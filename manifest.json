@@ -1,0 +1,9 @@
+{
+  "id": "review-plugin",
+  "name": "Рецензирование",
+  "version": "1.0.0",
+  "minAppVersion": "1.5.0",
+  "description": "Режим рецензирования для Obsidian.",
+  "author": "Виктория",
+  "isDesktopOnly": false
+}
