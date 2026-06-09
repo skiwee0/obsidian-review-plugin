@@ -20,8 +20,8 @@ import {
     reviewDecorations,
     reviewState,
     setBaseText,
-setReviewEnabled,
-setReviewState
+    setReviewEnabled,
+    setReviewState
 } from "./editor";
 
 type StoredReviewData =
@@ -594,6 +594,10 @@ export default class ReviewPlugin extends Plugin {
         const buttons =
             modal.contentEl.createDiv();
 
+            buttons.style.display = "flex";
+buttons.style.gap = "12px";
+buttons.style.marginTop = "12px";
+
         const okButton =
             buttons.createEl(
                 "button",
@@ -710,6 +714,81 @@ this.refocusEditor(cm);
     new Notice("Изменения отменены");
 }
 
+    private getTableCellRange(
+    cm: EditorView,
+    pos: number
+): { from: number; to: number } | null {
+
+    const line =
+        cm.state.doc.lineAt(pos);
+
+    const text =
+        line.text;
+
+    if (!text.includes("|")) {
+        return null;
+    }
+
+    const localPos =
+        pos - line.from;
+
+    const pipes: number[] = [];
+
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] === "|") {
+            pipes.push(i);
+        }
+    }
+
+    if (pipes.length < 2) {
+        return null;
+    }
+
+    for (let i = 0; i < pipes.length - 1; i++) {
+
+        const left =
+            pipes[i];
+
+        const right =
+            pipes[i + 1];
+
+        if (
+            localPos >= left &&
+            localPos <= right
+        ) {
+            let from =
+                line.from + left + 1;
+
+            let to =
+                line.from + right;
+
+            const doc =
+                cm.state.doc.toString();
+
+            while (
+                from < to &&
+                doc[from] === " "
+            ) {
+                from++;
+            }
+
+            while (
+                to > from &&
+                doc[to - 1] === " "
+            ) {
+                to--;
+            }
+
+            return {
+                from,
+                to
+            };
+        }
+    }
+
+    return null;
+}
+
     private findSelectedChange(
     cm: EditorView,
     review: ReviewData
@@ -718,40 +797,48 @@ this.refocusEditor(cm);
     const selection =
         cm.state.selection.main;
 
+    const cellRange =
+        this.getTableCellRange(
+            cm,
+            selection.from
+        );
+
+    const searchFrom =
+        selection.empty && cellRange
+            ? cellRange.from
+            : selection.from;
+
+    const searchTo =
+        selection.empty && cellRange
+            ? cellRange.to
+            : selection.to;
+
     const insert =
-        review.inserts.find(mark => {
-
-            if (selection.empty) {
-                return (
-                    selection.from >= mark.from &&
-                    selection.from <= mark.to
-                );
-            }
-
-            return (
-                selection.from < mark.to &&
-                selection.to > mark.from
-            );
-        });
+        review.inserts.find(mark =>
+            searchFrom < mark.to &&
+            searchTo > mark.from
+        );
 
     if (insert) {
         return {
             type: "insert" as const,
-            from: selection.empty
-                ? insert.from
-                : Math.max(selection.from, insert.from),
-            to: selection.empty
-                ? insert.to
-                : Math.min(selection.to, insert.to)
+            from: Math.max(
+                searchFrom,
+                insert.from
+            ),
+            to: Math.min(
+                searchTo,
+                insert.to
+            )
         };
     }
 
     const deleteMark =
         review.deletes.find(mark =>
-            Math.abs(selection.from - mark.from) <= 2 ||
+            Math.abs(searchFrom - mark.from) <= 2 ||
             (
-                selection.from <= mark.from &&
-                selection.to >= mark.from
+                searchFrom <= mark.from &&
+                searchTo >= mark.from
             )
         );
 
