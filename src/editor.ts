@@ -35,6 +35,9 @@ export const setReviewState =
 export const setReviewEnabled =
     StateEffect.define<boolean>();
 
+    export const setBaseText =
+    StateEffect.define<string>();
+
 export const acceptAllChanges =
     StateEffect.define<void>();
 
@@ -219,6 +222,11 @@ export const reviewState =
                         effect.value;
                 }
 
+                if (effect.is(setBaseText)) {
+    state.baseText =
+        effect.value;
+}
+
                 if (effect.is(acceptAllChanges)) {
                     state.inserts = [];
                     state.deletes = [];
@@ -269,7 +277,7 @@ export const reviewState =
                     if (change.type === "delete") {
                         state.deletes =
                             state.deletes.filter(mark =>
-                                mark.from !== change.from
+                                Math.abs(mark.from - change.from) > 2
                             );
                     }
                 }
@@ -313,7 +321,7 @@ export const reviewState =
                     if (change.type === "delete") {
                         state.deletes =
                             state.deletes.filter(mark =>
-                                mark.from !== change.from
+                                Math.abs(mark.from - change.from) > 2
                             );
                     }
                 }
