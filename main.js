@@ -30,6 +30,7 @@ var import_state = require("@codemirror/state");
 var import_view = require("@codemirror/view");
 var setReviewState = import_state.StateEffect.define();
 var setReviewEnabled = import_state.StateEffect.define();
+var setBaseText = import_state.StateEffect.define();
 var acceptAllChanges = import_state.StateEffect.define();
 var rejectAllChanges = import_state.StateEffect.define();
 var acceptChange = import_state.StateEffect.define();
@@ -129,6 +130,9 @@ var reviewState = import_state.StateField.define({
       if (effect.is(setReviewEnabled)) {
         state.enabled = effect.value;
       }
+      if (effect.is(setBaseText)) {
+        state.baseText = effect.value;
+      }
       if (effect.is(acceptAllChanges)) {
         state.inserts = [];
         state.deletes = [];
@@ -165,7 +169,7 @@ var reviewState = import_state.StateField.define({
         }
         if (change.type === "delete") {
           state.deletes = state.deletes.filter(
-            (mark) => mark.from !== change.from
+            (mark) => Math.abs(mark.from - change.from) > 2
           );
         }
       }
@@ -196,7 +200,7 @@ var reviewState = import_state.StateField.define({
         }
         if (change.type === "delete") {
           state.deletes = state.deletes.filter(
-            (mark) => mark.from !== change.from
+            (mark) => Math.abs(mark.from - change.from) > 2
           );
         }
       }
@@ -291,6 +295,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.reviewData = {};
+    this.saveTimer = null;
   }
   async onload() {
     const loaded = await this.loadData();
@@ -474,7 +479,16 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       return null;
     }
   }
-  async saveCurrentState(cm) {
+  scheduleSaveData() {
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+    }
+    this.saveTimer = window.setTimeout(() => {
+      this.saveData(this.reviewData);
+      this.saveTimer = null;
+    }, 300);
+  }
+  saveCurrentState(cm) {
     const path = this.getFilePath();
     if (!path) {
       return;
@@ -489,12 +503,10 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       inserts: [...review.inserts],
       deletes: [...review.deletes]
     };
-    await this.saveData(this.reviewData);
+    this.saveData(this.reviewData);
   }
-  async handleEditorUpdate(update) {
-    if (!update.docChanged && update.transactions.every(
-      (tr) => tr.effects.length === 0
-    )) {
+  handleEditorUpdate(update) {
+    if (!update.docChanged) {
       return;
     }
     const path = this.getFilePath();
@@ -526,7 +538,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       path,
       this.reviewData[path]
     );
-    await this.saveData(this.reviewData);
+    this.saveData(this.reviewData);
   }
   restoreActiveFileState(attempt = 0) {
     const path = this.getFilePath();
@@ -588,29 +600,104 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     this.saveCurrentState(cm);
     new import_obsidian.Notice("\u0420\u0435\u0446\u0435\u043D\u0437\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435 \u0432\u044B\u043A\u043B\u044E\u0447\u0435\u043D\u043E");
   }
-  acceptAll(cm) {
+  refocusEditor(cm) {
+    const focus = () => {
+      const leaf = this.app.workspace.activeLeaf;
+      if (leaf) {
+        this.app.workspace.setActiveLeaf(
+          leaf,
+          { focus: true }
+        );
+      }
+      const view = this.app.workspace.getActiveViewOfType(
+        import_obsidian.MarkdownView
+      );
+      const editor = view == null ? void 0 : view.editor;
+      if (editor == null ? void 0 : editor.focus) {
+        editor.focus();
+      }
+      cm.focus();
+      cm.contentDOM.focus();
+    };
+    window.setTimeout(focus, 50);
+    window.setTimeout(focus, 200);
+    window.setTimeout(focus, 500);
+    window.setTimeout(focus, 1e3);
+  }
+  confirmDialog(message) {
+    return new Promise((resolve) => {
+      const modal = new import_obsidian.Modal(this.app);
+      let resolved = false;
+      const finish = (result) => {
+        if (resolved) {
+          return;
+        }
+        resolved = true;
+        resolve(result);
+        modal.close();
+      };
+      modal.contentEl.createEl(
+        "p",
+        {
+          text: message
+        }
+      );
+      const buttons = modal.contentEl.createDiv();
+      const okButton = buttons.createEl(
+        "button",
+        {
+          text: "\u041E\u041A"
+        }
+      );
+      const cancelButton = buttons.createEl(
+        "button",
+        {
+          text: "\u041E\u0442\u043C\u0435\u043D\u0430"
+        }
+      );
+      okButton.onclick = () => {
+        finish(true);
+      };
+      cancelButton.onclick = () => {
+        finish(false);
+      };
+      modal.onClose = () => {
+        finish(false);
+      };
+      modal.open();
+    });
+  }
+  async acceptAll(cm) {
     const review = this.getReviewState(cm);
     if (!review) {
       return;
     }
-    const confirmed = window.confirm(
+    const confirmed = await this.confirmDialog(
       "\u041F\u0440\u0438\u043D\u044F\u0442\u044C \u0432\u0441\u0435 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u0432 \u0444\u0430\u0439\u043B\u0435?"
     );
     if (!confirmed) {
+      this.refocusEditor(cm);
       return;
     }
+    const cleanState = {
+      enabled: review.enabled,
+      baseText: cm.state.doc.toString(),
+      inserts: [],
+      deletes: []
+    };
     cm.dispatch({
-      effects: acceptAllChanges.of()
+      effects: setReviewState.of(cleanState)
     });
     this.saveCurrentState(cm);
     new import_obsidian.Notice("\u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u043F\u0440\u0438\u043D\u044F\u0442\u044B");
+    this.refocusEditor(cm);
   }
-  rejectAll(cm) {
+  async rejectAll(cm) {
     const review = this.getReviewState(cm);
     if (!review) {
       return;
     }
-    const confirmed = window.confirm(
+    const confirmed = await this.confirmDialog(
       "\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0432\u0441\u0435 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u0432 \u0444\u0430\u0439\u043B\u0435?"
     );
     if (!confirmed) {
@@ -638,14 +725,17 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
   }
   findSelectedChange(cm, review) {
     const selection = cm.state.selection.main;
-    const insert = review.inserts.find(
-      (mark) => selection.from >= mark.from && selection.to <= mark.to
-    );
+    const insert = review.inserts.find((mark) => {
+      if (selection.empty) {
+        return selection.from >= mark.from && selection.from <= mark.to;
+      }
+      return selection.from < mark.to && selection.to > mark.from;
+    });
     if (insert) {
       return {
         type: "insert",
-        from: selection.empty ? insert.from : selection.from,
-        to: selection.empty ? insert.to : selection.to
+        from: selection.empty ? insert.from : Math.max(selection.from, insert.from),
+        to: selection.empty ? insert.to : Math.min(selection.to, insert.to)
       };
     }
     const deleteMark = review.deletes.find(
@@ -661,28 +751,62 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     }
     return null;
   }
+  buildBaseTextFromCurrentState(cm, review) {
+    let text = cm.state.doc.toString();
+    const inserts = [...review.inserts].sort(
+      (a, b) => b.from - a.from
+    );
+    for (const mark of inserts) {
+      text = text.slice(0, mark.from) + text.slice(mark.to);
+    }
+    const deletes = [...review.deletes].sort(
+      (a, b) => b.from - a.from
+    );
+    for (const mark of deletes) {
+      text = text.slice(0, mark.from) + mark.text + text.slice(mark.from);
+    }
+    return text;
+  }
   acceptSelectedChange(cm, selected) {
+    const review = this.getReviewState(cm);
+    if (!review) {
+      return;
+    }
     if (selected.type === "insert") {
+      const nextInserts = review.inserts.filter(
+        (mark) => !(mark.from < selected.to && mark.to > selected.from)
+      );
+      const nextState = {
+        enabled: review.enabled,
+        baseText: cm.state.doc.toString(),
+        inserts: nextInserts,
+        deletes: [...review.deletes]
+      };
       cm.dispatch({
-        effects: acceptChange.of({
-          type: "insert",
-          from: selected.from,
-          to: selected.to
-        })
+        effects: setReviewState.of(nextState)
       });
       this.saveCurrentState(cm);
+      this.refocusEditor(cm);
       new import_obsidian.Notice("\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E");
       return;
     }
     if (selected.type === "delete") {
+      const nextDeletes = review.deletes.filter(
+        (mark) => Math.abs(
+          mark.from - selected.from
+        ) > 2
+      );
+      const nextState = {
+        enabled: review.enabled,
+        baseText: cm.state.doc.toString(),
+        inserts: [...review.inserts],
+        deletes: nextDeletes
+      };
       cm.dispatch({
-        effects: acceptChange.of({
-          type: "delete",
-          from: selected.from,
-          to: selected.to
-        })
+        effects: setReviewState.of(nextState)
       });
       this.saveCurrentState(cm);
+      this.refocusEditor(cm);
       new import_obsidian.Notice("\u0423\u0434\u0430\u043B\u0435\u043D\u0438\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E");
     }
   }
