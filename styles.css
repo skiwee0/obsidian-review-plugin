@@ -1,8 +1,12 @@
 .review-insert {
-    background-color: rgba(127, 255, 127, 0.4);
+    background-color: rgba(127, 255, 127, 0.4) !important;
+}
+
+.review-table-cell {
+    background-color: rgba(127, 255, 127, 0.45) !important;
 }
 
 .review-delete {
-    background-color: rgba(255, 120, 120, 0.45);
+    background-color: rgba(255, 120, 120, 0.45) !important;
     text-decoration: line-through;
 }
