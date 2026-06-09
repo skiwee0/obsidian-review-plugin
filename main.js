@@ -39,6 +39,46 @@ var internalChange = import_state.StateEffect.define();
 var insertDecoration = import_view.Decoration.mark({
   class: "review-insert"
 });
+var insertCellDecoration = import_view.Decoration.mark({
+  class: "review-insert review-table-cell"
+});
+function rangesOverlap(from1, to1, from2, to2) {
+  return from1 < to2 && to1 > from2;
+}
+function getTableCellRanges(text) {
+  const result = [];
+  let lineStart = 0;
+  for (const line of text.split("\n")) {
+    if (line.includes("|")) {
+      const pipeIndexes = [];
+      for (let i = 0; i < line.length; i++) {
+        if (line[i] === "|") {
+          pipeIndexes.push(i);
+        }
+      }
+      if (pipeIndexes.length >= 2) {
+        for (let i = 0; i < pipeIndexes.length - 1; i++) {
+          let from = lineStart + pipeIndexes[i] + 1;
+          let to = lineStart + pipeIndexes[i + 1];
+          while (from < to && text[from] === " ") {
+            from++;
+          }
+          while (to > from && text[to - 1] === " ") {
+            to--;
+          }
+          if (from < to) {
+            result.push({
+              from,
+              to
+            });
+          }
+        }
+      }
+    }
+    lineStart += line.length + 1;
+  }
+  return result;
+}
 var DeletedTextWidget = class extends import_view.WidgetType {
   constructor(text) {
     super();
@@ -250,12 +290,32 @@ var reviewDecorations = import_state.StateField.define({
     const review = tr.state.field(reviewState);
     const builder = new import_state.RangeSetBuilder();
     const items = [];
+    const docText = tr.state.doc.toString();
+    const tableCells = getTableCellRanges(docText);
     for (const mark of review.inserts) {
-      items.push({
-        from: mark.from,
-        to: mark.to,
-        decoration: insertDecoration
-      });
+      const affectedCells = tableCells.filter(
+        (cell) => rangesOverlap(
+          mark.from,
+          mark.to,
+          cell.from,
+          cell.to
+        )
+      );
+      if (affectedCells.length > 0) {
+        for (const cell of affectedCells) {
+          items.push({
+            from: cell.from,
+            to: cell.to,
+            decoration: insertCellDecoration
+          });
+        }
+      } else {
+        items.push({
+          from: mark.from,
+          to: mark.to,
+          decoration: insertDecoration
+        });
+      }
     }
     for (const mark of review.deletes) {
       items.push({
@@ -643,6 +703,9 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
         }
       );
       const buttons = modal.contentEl.createDiv();
+      buttons.style.display = "flex";
+      buttons.style.gap = "12px";
+      buttons.style.marginTop = "12px";
       const okButton = buttons.createEl(
         "button",
         {
@@ -723,23 +786,69 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     this.saveCurrentState(cm);
     new import_obsidian.Notice("\u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u044B");
   }
+  getTableCellRange(cm, pos) {
+    const line = cm.state.doc.lineAt(pos);
+    const text = line.text;
+    if (!text.includes("|")) {
+      return null;
+    }
+    const localPos = pos - line.from;
+    const pipes = [];
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === "|") {
+        pipes.push(i);
+      }
+    }
+    if (pipes.length < 2) {
+      return null;
+    }
+    for (let i = 0; i < pipes.length - 1; i++) {
+      const left = pipes[i];
+      const right = pipes[i + 1];
+      if (localPos >= left && localPos <= right) {
+        let from = line.from + left + 1;
+        let to = line.from + right;
+        const doc = cm.state.doc.toString();
+        while (from < to && doc[from] === " ") {
+          from++;
+        }
+        while (to > from && doc[to - 1] === " ") {
+          to--;
+        }
+        return {
+          from,
+          to
+        };
+      }
+    }
+    return null;
+  }
   findSelectedChange(cm, review) {
     const selection = cm.state.selection.main;
-    const insert = review.inserts.find((mark) => {
-      if (selection.empty) {
-        return selection.from >= mark.from && selection.from <= mark.to;
-      }
-      return selection.from < mark.to && selection.to > mark.from;
-    });
+    const cellRange = this.getTableCellRange(
+      cm,
+      selection.from
+    );
+    const searchFrom = selection.empty && cellRange ? cellRange.from : selection.from;
+    const searchTo = selection.empty && cellRange ? cellRange.to : selection.to;
+    const insert = review.inserts.find(
+      (mark) => searchFrom < mark.to && searchTo > mark.from
+    );
     if (insert) {
       return {
         type: "insert",
-        from: selection.empty ? insert.from : Math.max(selection.from, insert.from),
-        to: selection.empty ? insert.to : Math.min(selection.to, insert.to)
+        from: Math.max(
+          searchFrom,
+          insert.from
+        ),
+        to: Math.min(
+          searchTo,
+          insert.to
+        )
       };
     }
     const deleteMark = review.deletes.find(
-      (mark) => Math.abs(selection.from - mark.from) <= 2 || selection.from <= mark.from && selection.to >= mark.from
+      (mark) => Math.abs(searchFrom - mark.from) <= 2 || searchFrom <= mark.from && searchTo >= mark.from
     );
     if (deleteMark) {
       return {
