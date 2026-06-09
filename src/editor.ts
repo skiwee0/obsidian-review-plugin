@@ -66,6 +66,81 @@ const insertDecoration =
         class: "review-insert"
     });
 
+    const insertCellDecoration =
+    Decoration.mark({
+        class: "review-insert review-table-cell"
+    });
+
+function rangesOverlap(
+    from1: number,
+    to1: number,
+    from2: number,
+    to2: number
+) {
+    return from1 < to2 && to1 > from2;
+}
+
+function getTableCellRanges(
+    text: string
+): { from: number; to: number }[] {
+
+    const result: { from: number; to: number }[] = [];
+
+    let lineStart = 0;
+
+    for (const line of text.split("\n")) {
+
+        if (line.includes("|")) {
+
+            const pipeIndexes: number[] = [];
+
+            for (let i = 0; i < line.length; i++) {
+                if (line[i] === "|") {
+                    pipeIndexes.push(i);
+                }
+            }
+
+            if (pipeIndexes.length >= 2) {
+
+                for (let i = 0; i < pipeIndexes.length - 1; i++) {
+
+                    let from =
+                        lineStart + pipeIndexes[i] + 1;
+
+                    let to =
+                        lineStart + pipeIndexes[i + 1];
+
+                    while (
+                        from < to &&
+                        text[from] === " "
+                    ) {
+                        from++;
+                    }
+
+                    while (
+                        to > from &&
+                        text[to - 1] === " "
+                    ) {
+                        to--;
+                    }
+
+                    if (from < to) {
+                        result.push({
+                            from,
+                            to
+                        });
+                    }
+                }
+            }
+        }
+
+        lineStart +=
+            line.length + 1;
+    }
+
+    return result;
+}
+
 class DeletedTextWidget extends WidgetType {
 
     constructor(
@@ -327,12 +402,12 @@ export const reviewState =
                 }
             }
 
-            if (
-                state.enabled &&
-                tr.docChanged &&
-                !isInternal &&
-                !isRejectAll
-            ) {
+if (
+    state.enabled &&
+    tr.docChanged &&
+    !isInternal &&
+    !isRejectAll
+) {
                 tr.changes.iterChanges(
                     (
                         fromA,
@@ -416,13 +491,45 @@ export const reviewDecorations =
                 decoration: Decoration;
             }[] = [];
 
-            for (const mark of review.inserts) {
-                items.push({
-                    from: mark.from,
-                    to: mark.to,
-                    decoration: insertDecoration
-                });
-            }
+            const docText =
+    tr.state.doc.toString();
+
+const tableCells =
+    getTableCellRanges(docText);
+
+for (const mark of review.inserts) {
+
+    const affectedCells =
+        tableCells.filter(cell =>
+            rangesOverlap(
+                mark.from,
+                mark.to,
+                cell.from,
+                cell.to
+            )
+        );
+
+    if (affectedCells.length > 0) {
+
+        for (const cell of affectedCells) {
+            items.push({
+                from: cell.from,
+                to: cell.to,
+                decoration:
+                    insertCellDecoration
+            });
+        }
+
+    } else {
+
+        items.push({
+            from: mark.from,
+            to: mark.to,
+            decoration:
+                insertDecoration
+        });
+    }
+}
 
             for (const mark of review.deletes) {
                 items.push({
