@@ -1,7 +1,8 @@
 import {
     MarkdownView,
     Notice,
-    Plugin
+    Plugin,
+    Modal
 } from "obsidian";
 
 import {
@@ -18,8 +19,9 @@ import {
     rejectChange,
     reviewDecorations,
     reviewState,
-    setReviewEnabled,
-    setReviewState
+    setBaseText,
+setReviewEnabled,
+setReviewState
 } from "./editor";
 
 type StoredReviewData =
@@ -28,6 +30,8 @@ type StoredReviewData =
 export default class ReviewPlugin extends Plugin {
 
     private reviewData: StoredReviewData = {};
+
+    private saveTimer: number | null = null;
 
     async onload() {
 
@@ -292,46 +296,53 @@ export default class ReviewPlugin extends Plugin {
         }
     }
 
-    private async saveCurrentState(
-        cm: EditorView
-    ) {
+    private scheduleSaveData() {
 
-        const path =
-            this.getFilePath();
-
-        if (!path) {
-            return;
-        }
-
-        const review =
-            this.getReviewState(cm);
-
-        if (!review) {
-            return;
-        }
-
-        this.reviewData[path] = {
-            enabled: review.enabled,
-            baseText: review.baseText,
-            inserts: [...review.inserts],
-            deletes: [...review.deletes]
-        };
-
-        await this.saveData(this.reviewData);
+    if (this.saveTimer !== null) {
+        window.clearTimeout(this.saveTimer);
     }
 
-  private async handleEditorUpdate(
+    this.saveTimer = window.setTimeout(() => {
+        this.saveData(this.reviewData);
+        this.saveTimer = null;
+    }, 300);
+}
+
+    private saveCurrentState(
+    cm: EditorView
+) {
+
+    const path =
+        this.getFilePath();
+
+    if (!path) {
+        return;
+    }
+
+    const review =
+        this.getReviewState(cm);
+
+    if (!review) {
+        return;
+    }
+
+    this.reviewData[path] = {
+        enabled: review.enabled,
+        baseText: review.baseText,
+        inserts: [...review.inserts],
+        deletes: [...review.deletes]
+    };
+
+    this.saveData(this.reviewData);
+}
+
+  private handleEditorUpdate(
     update: ViewUpdate
 ) {
 
-    if (
-        !update.docChanged &&
-        update.transactions.every(
-            tr => tr.effects.length === 0
-        )
-    ) {
-        return;
-    }
+    if (!update.docChanged) {
+    return;
+}
 
     const path =
         this.getFilePath();
@@ -390,7 +401,7 @@ export default class ReviewPlugin extends Plugin {
         this.reviewData[path]
     );
 
-    await this.saveData(this.reviewData);
+    this.saveData(this.reviewData);
 }
 
     private restoreActiveFileState(
@@ -511,37 +522,111 @@ export default class ReviewPlugin extends Plugin {
         new Notice("Рецензирование выключено");
     }
 
-    private acceptAll(
-        cm: EditorView
-    ) {
+   private refocusEditor(
+    cm: EditorView
+) {
+    const focus = () => {
 
-        const review =
-            this.getReviewState(cm);
+        const leaf =
+            this.app.workspace.activeLeaf;
 
-        if (!review) {
-            return;
+        if (leaf) {
+            this.app.workspace.setActiveLeaf(
+                leaf,
+                { focus: true }
+            );
         }
 
-        const confirmed =
-            window.confirm(
-                "Принять все изменения в файле?"
+        const view =
+            this.app.workspace.getActiveViewOfType(
+                MarkdownView
             );
 
-        if (!confirmed) {
-            return;
+        const editor =
+            (view as any)?.editor;
+
+        if (editor?.focus) {
+            editor.focus();
         }
 
-        cm.dispatch({
-            effects:
-                acceptAllChanges.of()
-        });
+        cm.focus();
+        cm.contentDOM.focus();
+    };
 
-        this.saveCurrentState(cm);
+    window.setTimeout(focus, 50);
+    window.setTimeout(focus, 200);
+    window.setTimeout(focus, 500);
+    window.setTimeout(focus, 1000);
+}
 
-        new Notice("Изменения приняты");
-    }
+    private confirmDialog(
+    message: string
+): Promise<boolean> {
 
-   private rejectAll(
+    return new Promise(resolve => {
+
+        const modal =
+            new Modal(this.app);
+
+        let resolved =
+            false;
+
+        const finish = (
+            result: boolean
+        ) => {
+
+            if (resolved) {
+                return;
+            }
+
+            resolved = true;
+            resolve(result);
+            modal.close();
+        };
+
+        modal.contentEl.createEl(
+            "p",
+            {
+                text: message
+            }
+        );
+
+        const buttons =
+            modal.contentEl.createDiv();
+
+        const okButton =
+            buttons.createEl(
+                "button",
+                {
+                    text: "ОК"
+                }
+            );
+
+        const cancelButton =
+            buttons.createEl(
+                "button",
+                {
+                    text: "Отмена"
+                }
+            );
+
+        okButton.onclick = () => {
+            finish(true);
+        };
+
+        cancelButton.onclick = () => {
+            finish(false);
+        };
+
+        modal.onClose = () => {
+            finish(false);
+        };
+
+        modal.open();
+    });
+}
+
+    private async acceptAll(
     cm: EditorView
 ) {
 
@@ -553,9 +638,49 @@ export default class ReviewPlugin extends Plugin {
     }
 
     const confirmed =
-        window.confirm(
-            "Отменить все изменения в файле?"
-        );
+    await this.confirmDialog(
+        "Принять все изменения в файле?"
+    );
+
+    if (!confirmed) {
+        this.refocusEditor(cm);
+        return;
+    }
+
+    const cleanState: ReviewData = {
+        enabled: review.enabled,
+        baseText: cm.state.doc.toString(),
+        inserts: [],
+        deletes: []
+    };
+
+    cm.dispatch({
+        effects:
+            setReviewState.of(cleanState)
+    });
+
+    this.saveCurrentState(cm);
+
+new Notice("Изменения приняты");
+
+this.refocusEditor(cm);
+}
+
+   private async rejectAll(
+    cm: EditorView
+) {
+
+    const review =
+        this.getReviewState(cm);
+
+    if (!review) {
+        return;
+    }
+
+    const confirmed =
+    await this.confirmDialog(
+        "Отменить все изменения в файле?"
+    );
 
     if (!confirmed) {
         return;
@@ -586,88 +711,164 @@ export default class ReviewPlugin extends Plugin {
 }
 
     private findSelectedChange(
-        cm: EditorView,
-        review: ReviewData
-    ) {
+    cm: EditorView,
+    review: ReviewData
+) {
 
-        const selection =
-            cm.state.selection.main;
+    const selection =
+        cm.state.selection.main;
 
-        const insert =
-            review.inserts.find(mark =>
-                selection.from >= mark.from &&
-                selection.to <= mark.to
+    const insert =
+        review.inserts.find(mark => {
+
+            if (selection.empty) {
+                return (
+                    selection.from >= mark.from &&
+                    selection.from <= mark.to
+                );
+            }
+
+            return (
+                selection.from < mark.to &&
+                selection.to > mark.from
             );
+        });
 
-        if (insert) {
-    return {
-        type: "insert" as const,
-        from: selection.empty
-            ? insert.from
-            : selection.from,
-        to: selection.empty
-            ? insert.to
-            : selection.to
-    };
+    if (insert) {
+        return {
+            type: "insert" as const,
+            from: selection.empty
+                ? insert.from
+                : Math.max(selection.from, insert.from),
+            to: selection.empty
+                ? insert.to
+                : Math.min(selection.to, insert.to)
+        };
+    }
+
+    const deleteMark =
+        review.deletes.find(mark =>
+            Math.abs(selection.from - mark.from) <= 2 ||
+            (
+                selection.from <= mark.from &&
+                selection.to >= mark.from
+            )
+        );
+
+    if (deleteMark) {
+        return {
+            type: "delete" as const,
+            from: deleteMark.from,
+            to: deleteMark.from,
+            text: deleteMark.text
+        };
+    }
+
+    return null;
 }
 
-        const deleteMark =
-            review.deletes.find(mark =>
-                Math.abs(selection.from - mark.from) <= 2 ||
-                (
-                    selection.from <= mark.from &&
-                    selection.to >= mark.from
+   private buildBaseTextFromCurrentState(
+    cm: EditorView,
+    review: ReviewData
+): string {
+
+    let text =
+        cm.state.doc.toString();
+
+    const inserts =
+        [...review.inserts].sort(
+            (a, b) => b.from - a.from
+        );
+
+    for (const mark of inserts) {
+        text =
+            text.slice(0, mark.from) +
+            text.slice(mark.to);
+    }
+
+    const deletes =
+        [...review.deletes].sort(
+            (a, b) => b.from - a.from
+        );
+
+    for (const mark of deletes) {
+        text =
+            text.slice(0, mark.from) +
+            mark.text +
+            text.slice(mark.from);
+    }
+
+    return text;
+}
+
+   private acceptSelectedChange(
+    cm: EditorView,
+    selected: any
+) {
+
+    const review =
+        this.getReviewState(cm);
+
+    if (!review) {
+        return;
+    }
+
+    if (selected.type === "insert") {
+
+        const nextInserts =
+            review.inserts.filter(mark =>
+                !(
+                    mark.from < selected.to &&
+                    mark.to > selected.from
                 )
             );
 
-        if (deleteMark) {
-            return {
-                type: "delete" as const,
-                from: deleteMark.from,
-                to: deleteMark.from,
-                text: deleteMark.text
-            };
-        }
+        const nextState: ReviewData = {
+            enabled: review.enabled,
+            baseText: cm.state.doc.toString(),
+            inserts: nextInserts,
+            deletes: [...review.deletes]
+        };
 
-        return null;
+        cm.dispatch({
+            effects:
+                setReviewState.of(nextState)
+        });
+
+        this.saveCurrentState(cm);
+        this.refocusEditor(cm);
+
+        new Notice("Добавление принято");
+        return;
     }
 
-    private acceptSelectedChange(
-        cm: EditorView,
-        selected: any
-    ) {
+    if (selected.type === "delete") {
 
-        if (selected.type === "insert") {
-            cm.dispatch({
-                effects:
-                    acceptChange.of({
-                        type: "insert",
-                        from: selected.from,
-                        to: selected.to
-                    })
-            });
+        const nextDeletes =
+            review.deletes.filter(mark =>
+                Math.abs(
+                    mark.from - selected.from
+                ) > 2
+            );
 
-            this.saveCurrentState(cm);
+        const nextState: ReviewData = {
+            enabled: review.enabled,
+            baseText: cm.state.doc.toString(),
+            inserts: [...review.inserts],
+            deletes: nextDeletes
+        };
 
-            new Notice("Добавление принято");
-            return;
-        }
+        cm.dispatch({
+            effects:
+                setReviewState.of(nextState)
+        });
 
-        if (selected.type === "delete") {
-            cm.dispatch({
-                effects:
-                    acceptChange.of({
-                        type: "delete",
-                        from: selected.from,
-                        to: selected.to
-                    })
-            });
+        this.saveCurrentState(cm);
+        this.refocusEditor(cm);
 
-            this.saveCurrentState(cm);
-
-            new Notice("Удаление принято");
-        }
+        new Notice("Удаление принято");
     }
+}
 
    private rejectSelectedChange(
     cm: EditorView,
