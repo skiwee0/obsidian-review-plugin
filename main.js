@@ -251,8 +251,10 @@ var reviewState = import_state.StateField.define({
           const insertedLength = toB - fromB;
           const removedLength = toA - fromA;
           if (insertedLength > 0) {
+            const insertedText = inserted.toString();
             const last = state.inserts[state.inserts.length - 1];
-            if (last && last.to === fromB) {
+            const shouldMerge = last && last.to === fromB && !insertedText.includes("\n") && !insertedText.includes("|");
+            if (shouldMerge) {
               last.to = toB;
             } else {
               state.inserts.push({
@@ -293,6 +295,11 @@ var reviewDecorations = import_state.StateField.define({
     const docText = tr.state.doc.toString();
     const tableCells = getTableCellRanges(docText);
     for (const mark of review.inserts) {
+      items.push({
+        from: mark.from,
+        to: mark.to,
+        decoration: insertDecoration
+      });
       const affectedCells = tableCells.filter(
         (cell) => rangesOverlap(
           mark.from,
@@ -301,19 +308,17 @@ var reviewDecorations = import_state.StateField.define({
           cell.to
         )
       );
-      if (affectedCells.length > 0) {
-        for (const cell of affectedCells) {
-          items.push({
-            from: cell.from,
-            to: cell.to,
-            decoration: insertCellDecoration
-          });
-        }
-      } else {
+      for (const cell of affectedCells) {
         items.push({
-          from: mark.from,
-          to: mark.to,
-          decoration: insertDecoration
+          from: Math.max(
+            cell.from,
+            mark.from
+          ),
+          to: Math.min(
+            cell.to,
+            mark.to
+          ),
+          decoration: insertCellDecoration
         });
       }
     }
@@ -882,18 +887,24 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       return;
     }
     if (selected.type === "insert") {
-      const nextInserts = review.inserts.filter(
-        (mark) => !(mark.from < selected.to && mark.to > selected.from)
-      );
-      const nextState = {
-        enabled: review.enabled,
-        baseText: cm.state.doc.toString(),
-        inserts: nextInserts,
-        deletes: [...review.deletes]
-      };
       cm.dispatch({
-        effects: setReviewState.of(nextState)
+        effects: acceptChange.of({
+          type: "insert",
+          from: selected.from,
+          to: selected.to
+        })
       });
+      const updatedReview = this.getReviewState(cm);
+      if (updatedReview) {
+        cm.dispatch({
+          effects: setBaseText.of(
+            this.buildBaseTextFromCurrentState(
+              cm,
+              updatedReview
+            )
+          )
+        });
+      }
       this.saveCurrentState(cm);
       this.refocusEditor(cm);
       new import_obsidian.Notice("\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E");
