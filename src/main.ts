@@ -2,7 +2,8 @@ import {
     MarkdownView,
     Notice,
     Plugin,
-    Modal
+    Modal,
+    TFile
 } from "obsidian";
 
 import {
@@ -52,6 +53,23 @@ export default class ReviewPlugin extends Plugin {
         }
     )
 ]);
+
+this.registerMarkdownPostProcessor(
+    (el, ctx) => {
+
+        const apply = () => {
+            void this.renderReadingTableMarks(
+                el,
+                ctx.sourcePath
+            );
+        };
+
+        apply();
+        window.setTimeout(apply, 50);
+        window.setTimeout(apply, 200);
+        window.setTimeout(apply, 500);
+    }
+);
 
         this.registerEvent(
             this.app.workspace.on(
@@ -263,6 +281,249 @@ export default class ReviewPlugin extends Plugin {
 
         console.log("Review plugin loaded");
     }
+
+    private rangesOverlap(
+    from1: number,
+    to1: number,
+    from2: number,
+    to2: number
+): boolean {
+    return from1 < to2 && to1 > from2;
+}
+
+private getMarkdownTableRows(
+    source: string
+): {
+    rowFrom: number;
+    rowTo: number;
+    cells: { from: number; to: number }[];
+}[] {
+
+    const result: {
+        rowFrom: number;
+        rowTo: number;
+        cells: { from: number; to: number }[];
+    }[] = [];
+
+    let lineStart = 0;
+
+    for (const line of source.split("\n")) {
+
+        const lineEnd =
+            lineStart + line.length;
+
+        if (line.includes("|")) {
+
+            const pipeIndexes: number[] = [];
+
+            for (let i = 0; i < line.length; i++) {
+                if (line[i] === "|") {
+                    pipeIndexes.push(i);
+                }
+            }
+
+            if (pipeIndexes.length >= 2) {
+
+                const rawCells =
+                    pipeIndexes
+                        .slice(0, -1)
+                        .map((pipe, index) => {
+                            const nextPipe =
+                                pipeIndexes[index + 1];
+
+                            return line
+                                .slice(pipe + 1, nextPipe)
+                                .trim();
+                        });
+
+                const isSeparatorRow =
+                    rawCells.length > 0 &&
+                    rawCells.every(cell =>
+                        /^:?-{3,}:?$/.test(cell)
+                    );
+
+                if (!isSeparatorRow) {
+
+                    const cells: {
+                        from: number;
+                        to: number;
+                    }[] = [];
+
+                    for (
+                        let i = 0;
+                        i < pipeIndexes.length - 1;
+                        i++
+                    ) {
+
+                        let from =
+                            lineStart + pipeIndexes[i] + 1;
+
+                        let to =
+                            lineStart + pipeIndexes[i + 1];
+
+                        while (
+                            from < to &&
+                            source[from] === " "
+                        ) {
+                            from++;
+                        }
+
+                        while (
+                            to > from &&
+                            source[to - 1] === " "
+                        ) {
+                            to--;
+                        }
+
+                        cells.push({
+                            from,
+                            to
+                        });
+                    }
+
+                    result.push({
+                        rowFrom: lineStart,
+                        rowTo: lineEnd,
+                        cells
+                    });
+                }
+            }
+        }
+
+        lineStart +=
+            line.length + 1;
+    }
+
+    return result;
+}
+
+private async renderReadingTableMarks(
+    el: HTMLElement,
+    sourcePath: string
+) {
+
+    const review =
+        this.reviewData[sourcePath];
+
+    if (!review) {
+        return;
+    }
+
+    const file =
+        this.app.vault.getAbstractFileByPath(
+            sourcePath
+        );
+
+    if (!(file instanceof TFile)) {
+        return;
+    }
+
+    const source =
+        await this.app.vault.read(file);
+
+    const markdownRows =
+        this.getMarkdownTableRows(source);
+
+    if (markdownRows.length === 0) {
+        return;
+    }
+
+    const renderedRows =
+        Array.from(
+            el.querySelectorAll("table tr")
+        ) as HTMLElement[];
+
+    for (
+        let rowIndex = 0;
+        rowIndex < renderedRows.length;
+        rowIndex++
+    ) {
+
+        const markdownRow =
+            markdownRows[rowIndex];
+
+        const renderedRow =
+            renderedRows[rowIndex];
+
+        if (!markdownRow || !renderedRow) {
+            continue;
+        }
+
+        const renderedCells =
+            Array.from(
+                renderedRow.querySelectorAll(
+                    "th, td"
+                )
+            ) as HTMLElement[];
+
+        for (
+            let cellIndex = 0;
+            cellIndex < renderedCells.length;
+            cellIndex++
+        ) {
+
+            const markdownCell =
+                markdownRow.cells[cellIndex];
+
+            const renderedCell =
+                renderedCells[cellIndex];
+
+            if (!markdownCell || !renderedCell) {
+                continue;
+            }
+
+            const cellHasInsert =
+                review.inserts.some(mark =>
+                    this.rangesOverlap(
+                        mark.from,
+                        mark.to,
+                        markdownCell.from,
+                        markdownCell.to
+                    )
+                );
+
+            if (cellHasInsert) {
+                renderedCell.classList.add(
+                    "review-reading-table-cell"
+                );
+
+                renderedCell.style.backgroundColor =
+                    "rgba(127, 255, 127, 0.45)";
+            }
+
+            const deletes =
+                review.deletes.filter(mark =>
+                    mark.from >= markdownCell.from &&
+                    mark.from <= markdownCell.to
+                );
+
+           for (const deleted of deletes) {
+
+    const existingText =
+        renderedCell.textContent ?? "";
+
+    if (
+        existingText.includes(
+            deleted.text
+        )
+    ) {
+        continue;
+    }
+
+    const span =
+        document.createElement("span");
+
+    span.className =
+        "review-delete";
+
+    span.textContent =
+        deleted.text;
+
+    renderedCell.appendChild(span);
+}
+        }
+    }
+}
 
     private getFilePath(): string | null {
 
