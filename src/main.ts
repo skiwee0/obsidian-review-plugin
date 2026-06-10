@@ -397,10 +397,64 @@ private getMarkdownTableRows(
     return result;
 }
 
+private refreshReadingMarks() {
+
+    window.setTimeout(() => {
+
+        const view =
+            this.app.workspace.getActiveViewOfType(
+                MarkdownView
+            );
+
+        const file =
+            this.app.workspace.getActiveFile();
+
+        if (!view || !file) {
+            return;
+        }
+
+        const container =
+            (view as any).contentEl as HTMLElement;
+
+        if (!container) {
+            return;
+        }
+
+        void this.renderReadingTableMarks(
+            container,
+            file.path
+        );
+
+    }, 100);
+}
+
 private async renderReadingTableMarks(
     el: HTMLElement,
     sourcePath: string
 ) {
+
+    const renderedCells =
+        Array.from(
+            el.querySelectorAll(
+                "table th, table td"
+            )
+        ) as HTMLElement[];
+
+    for (const cell of renderedCells) {
+        cell.classList.remove(
+            "review-reading-table-cell"
+        );
+
+        cell.style.backgroundColor = "";
+
+        cell
+            .querySelectorAll(
+                ".review-reading-delete"
+            )
+            .forEach(node =>
+                node.remove()
+            );
+    }
 
     const review =
         this.reviewData[sourcePath];
@@ -424,10 +478,6 @@ private async renderReadingTableMarks(
     const markdownRows =
         this.getMarkdownTableRows(source);
 
-    if (markdownRows.length === 0) {
-        return;
-    }
-
     const renderedRows =
         Array.from(
             el.querySelectorAll("table tr")
@@ -449,7 +499,7 @@ private async renderReadingTableMarks(
             continue;
         }
 
-        const renderedCells =
+        const cells =
             Array.from(
                 renderedRow.querySelectorAll(
                     "th, td"
@@ -458,7 +508,7 @@ private async renderReadingTableMarks(
 
         for (
             let cellIndex = 0;
-            cellIndex < renderedCells.length;
+            cellIndex < cells.length;
             cellIndex++
         ) {
 
@@ -466,7 +516,7 @@ private async renderReadingTableMarks(
                 markdownRow.cells[cellIndex];
 
             const renderedCell =
-                renderedCells[cellIndex];
+                cells[cellIndex];
 
             if (!markdownCell || !renderedCell) {
                 continue;
@@ -493,34 +543,22 @@ private async renderReadingTableMarks(
 
             const deletes =
                 review.deletes.filter(mark =>
-                    mark.from >= markdownCell.from &&
-                    mark.from <= markdownCell.to
+                    mark.from >= markdownCell.from - 1 &&
+                    mark.from <= markdownCell.to + 1
                 );
 
-           for (const deleted of deletes) {
+            for (const deleted of deletes) {
+                const span =
+                    document.createElement("span");
 
-    const existingText =
-        renderedCell.textContent ?? "";
+                span.className =
+                    "review-delete review-reading-delete";
 
-    if (
-        existingText.includes(
-            deleted.text
-        )
-    ) {
-        continue;
-    }
+                span.textContent =
+                    deleted.text;
 
-    const span =
-        document.createElement("span");
-
-    span.className =
-        "review-delete";
-
-    span.textContent =
-        deleted.text;
-
-    renderedCell.appendChild(span);
-}
+                renderedCell.appendChild(span);
+            }
         }
     }
 }
@@ -929,6 +967,7 @@ buttons.style.marginTop = "12px";
 new Notice("Изменения приняты");
 
 this.refocusEditor(cm);
+this.refreshReadingMarks();
 }
 
    private async rejectAll(
@@ -973,6 +1012,8 @@ this.refocusEditor(cm);
     this.saveCurrentState(cm);
 
     new Notice("Изменения отменены");
+
+this.refreshReadingMarks();
 }
 
     private getTableCellRange(
@@ -1083,14 +1124,12 @@ this.refocusEditor(cm);
     if (insert) {
         return {
             type: "insert" as const,
-            from: Math.max(
-                searchFrom,
-                insert.from
-            ),
-            to: Math.min(
-                searchTo,
-                insert.to
-            )
+            from: selection.empty
+                ? Math.max(searchFrom, insert.from)
+                : searchFrom,
+            to: selection.empty
+                ? Math.min(searchTo, insert.to)
+                : searchTo
         };
     }
 
@@ -1161,36 +1200,164 @@ this.refocusEditor(cm);
         return;
     }
 
+    const cellRange =
+        this.getTableCellRange(
+            cm,
+            selected.from
+        );
+
+    const acceptFrom =
+        cellRange
+            ? cellRange.from
+            : selected.from;
+
+    const acceptTo =
+        cellRange
+            ? cellRange.to
+            : selected.to;
+
     if (selected.type === "insert") {
+
+    const review =
+        this.getReviewState(cm);
+
+    if (!review) {
+        return;
+    }
+
+    const cellRange =
+        this.getTableCellRange(
+            cm,
+            selected.from
+        );
+
+    const relatedDeletes =
+        cellRange
+            ? review.deletes.filter(mark =>
+                mark.from >= cellRange.from - 1 &&
+                mark.from <= cellRange.to + 1
+            )
+            : review.deletes.filter(mark =>
+                mark.from >= selected.from - 1 &&
+                mark.from <= selected.to + 1
+            );
+
+    const restoreText =
+        relatedDeletes
+            .map(mark => mark.text)
+            .join("");
+
+    let from =
+        selected.from;
+
+    let to =
+        selected.to;
+
+    const doc =
+        cm.state.doc.toString();
+
+    if (!restoreText) {
+        if (
+            from > 0 &&
+            doc[from - 1] === " "
+        ) {
+            from--;
+        } else if (
+            to < doc.length &&
+            doc[to] === " "
+        ) {
+            to++;
+        }
+    }
+
+    const deletedLength =
+        to - from;
+
+    const insertedLength =
+        restoreText.length;
+
+    const delta =
+        insertedLength - deletedLength;
+
+    const nextInserts: {
+        from: number;
+        to: number;
+    }[] = [];
+
+    for (const mark of review.inserts) {
+
+        const overlaps =
+            mark.from < to &&
+            mark.to > from;
+
+        if (!overlaps) {
+            if (mark.to <= from) {
+                nextInserts.push({
+                    from: mark.from,
+                    to: mark.to
+                });
+            } else if (mark.from >= to) {
+                nextInserts.push({
+                    from: mark.from + delta,
+                    to: mark.to + delta
+                });
+            }
+
+            continue;
+        }
+
+        if (mark.from < from) {
+            nextInserts.push({
+                from: mark.from,
+                to: from
+            });
+        }
+
+        if (mark.to > to) {
+            nextInserts.push({
+                from: from + insertedLength,
+                to: mark.to + delta
+            });
+        }
+    }
+
+    const nextDeletes =
+        review.deletes
+            .filter(mark =>
+                !relatedDeletes.includes(mark)
+            )
+            .map(mark => ({
+                from:
+                    mark.from >= to
+                        ? mark.from + delta
+                        : mark.from,
+                text: mark.text
+            }));
+
+    cm.dispatch({
+        changes: {
+            from,
+            to,
+            insert: restoreText
+        },
+        effects:
+            internalChange.of()
+    });
 
     cm.dispatch({
         effects:
-            acceptChange.of({
-                type: "insert",
-                from: selected.from,
-                to: selected.to
+            setReviewState.of({
+                enabled: review.enabled,
+                baseText: review.baseText,
+                inserts: nextInserts,
+                deletes: nextDeletes
             })
     });
 
-    const updatedReview =
-        this.getReviewState(cm);
-
-    if (updatedReview) {
-        cm.dispatch({
-            effects:
-                setBaseText.of(
-                    this.buildBaseTextFromCurrentState(
-                        cm,
-                        updatedReview
-                    )
-                )
-        });
-    }
-
     this.saveCurrentState(cm);
-    this.refocusEditor(cm);
+    this.refreshReadingMarks();
 
-    new Notice("Добавление принято");
+    new Notice("Добавление отменено");
     return;
 }
 
@@ -1198,27 +1365,51 @@ this.refocusEditor(cm);
 
         const nextDeletes =
             review.deletes.filter(mark =>
-                Math.abs(
-                    mark.from - selected.from
-                ) > 2
+                !(
+                    mark.from >= acceptFrom - 1 &&
+                    mark.from <= acceptTo + 1
+                )
             );
 
-        const nextState: ReviewData = {
+        const tempState: ReviewData = {
             enabled: review.enabled,
-            baseText: cm.state.doc.toString(),
+            baseText: review.baseText,
             inserts: [...review.inserts],
             deletes: nextDeletes
         };
 
+        const nextState: ReviewData = {
+            ...tempState,
+            baseText:
+                this.buildBaseTextFromCurrentState(
+                    cm,
+                    tempState
+                )
+        };
+
         cm.dispatch({
-            effects:
-                setReviewState.of(nextState)
-        });
+    effects:
+        setReviewState.of(nextState)
+});
 
-        this.saveCurrentState(cm);
-        this.refocusEditor(cm);
+const path =
+    this.getFilePath();
 
-        new Notice("Удаление принято");
+if (path) {
+    this.reviewData[path] = {
+        enabled: nextState.enabled,
+        baseText: nextState.baseText,
+        inserts: [...nextState.inserts],
+        deletes: [...nextState.deletes]
+    };
+
+    this.saveData(this.reviewData);
+}
+
+this.refocusEditor(cm);
+this.refreshReadingMarks();
+
+new Notice("Удаление принято");
     }
 }
 
@@ -1342,9 +1533,10 @@ this.refocusEditor(cm);
     });
 
     this.saveCurrentState(cm);
+this.refreshReadingMarks();
 
-    new Notice("Добавление отменено");
-    return;
+new Notice("Добавление отменено");
+return;
 }
 
     if (selected.type === "delete") {
@@ -1378,8 +1570,9 @@ this.refocusEditor(cm);
         });
 
         this.saveCurrentState(cm);
+this.refreshReadingMarks();
 
-        new Notice("Удаление отменено");
+new Notice("Удаление отменено");
     }
 }
 
