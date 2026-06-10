@@ -589,8 +589,42 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     }
     return result;
   }
+  refreshReadingMarks() {
+    window.setTimeout(() => {
+      const view = this.app.workspace.getActiveViewOfType(
+        import_obsidian.MarkdownView
+      );
+      const file = this.app.workspace.getActiveFile();
+      if (!view || !file) {
+        return;
+      }
+      const container = view.contentEl;
+      if (!container) {
+        return;
+      }
+      void this.renderReadingTableMarks(
+        container,
+        file.path
+      );
+    }, 100);
+  }
   async renderReadingTableMarks(el, sourcePath) {
-    var _a;
+    const renderedCells = Array.from(
+      el.querySelectorAll(
+        "table th, table td"
+      )
+    );
+    for (const cell of renderedCells) {
+      cell.classList.remove(
+        "review-reading-table-cell"
+      );
+      cell.style.backgroundColor = "";
+      cell.querySelectorAll(
+        ".review-reading-delete"
+      ).forEach(
+        (node) => node.remove()
+      );
+    }
     const review = this.reviewData[sourcePath];
     if (!review) {
       return;
@@ -603,9 +637,6 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     }
     const source = await this.app.vault.read(file);
     const markdownRows = this.getMarkdownTableRows(source);
-    if (markdownRows.length === 0) {
-      return;
-    }
     const renderedRows = Array.from(
       el.querySelectorAll("table tr")
     );
@@ -615,14 +646,14 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       if (!markdownRow || !renderedRow) {
         continue;
       }
-      const renderedCells = Array.from(
+      const cells = Array.from(
         renderedRow.querySelectorAll(
           "th, td"
         )
       );
-      for (let cellIndex = 0; cellIndex < renderedCells.length; cellIndex++) {
+      for (let cellIndex = 0; cellIndex < cells.length; cellIndex++) {
         const markdownCell = markdownRow.cells[cellIndex];
-        const renderedCell = renderedCells[cellIndex];
+        const renderedCell = cells[cellIndex];
         if (!markdownCell || !renderedCell) {
           continue;
         }
@@ -641,17 +672,11 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
           renderedCell.style.backgroundColor = "rgba(127, 255, 127, 0.45)";
         }
         const deletes = review.deletes.filter(
-          (mark) => mark.from >= markdownCell.from && mark.from <= markdownCell.to
+          (mark) => mark.from >= markdownCell.from - 1 && mark.from <= markdownCell.to + 1
         );
         for (const deleted of deletes) {
-          const existingText = (_a = renderedCell.textContent) != null ? _a : "";
-          if (existingText.includes(
-            deleted.text
-          )) {
-            continue;
-          }
           const span = document.createElement("span");
-          span.className = "review-delete";
+          span.className = "review-delete review-reading-delete";
           span.textContent = deleted.text;
           renderedCell.appendChild(span);
         }
@@ -893,6 +918,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     this.saveCurrentState(cm);
     new import_obsidian.Notice("\u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u043F\u0440\u0438\u043D\u044F\u0442\u044B");
     this.refocusEditor(cm);
+    this.refreshReadingMarks();
   }
   async rejectAll(cm) {
     const review = this.getReviewState(cm);
@@ -924,6 +950,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     });
     this.saveCurrentState(cm);
     new import_obsidian.Notice("\u0418\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u044B");
+    this.refreshReadingMarks();
   }
   getTableCellRange(cm, pos) {
     const line = cm.state.doc.lineAt(pos);
@@ -976,14 +1003,8 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     if (insert) {
       return {
         type: "insert",
-        from: Math.max(
-          searchFrom,
-          insert.from
-        ),
-        to: Math.min(
-          searchTo,
-          insert.to
-        )
+        from: selection.empty ? Math.max(searchFrom, insert.from) : searchFrom,
+        to: selection.empty ? Math.min(searchTo, insert.to) : searchTo
       };
     }
     const deleteMark = review.deletes.find(
@@ -1020,47 +1041,129 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     if (!review) {
       return;
     }
+    const cellRange = this.getTableCellRange(
+      cm,
+      selected.from
+    );
+    const acceptFrom = cellRange ? cellRange.from : selected.from;
+    const acceptTo = cellRange ? cellRange.to : selected.to;
     if (selected.type === "insert") {
+      const review2 = this.getReviewState(cm);
+      if (!review2) {
+        return;
+      }
+      const cellRange2 = this.getTableCellRange(
+        cm,
+        selected.from
+      );
+      const relatedDeletes = cellRange2 ? review2.deletes.filter(
+        (mark) => mark.from >= cellRange2.from - 1 && mark.from <= cellRange2.to + 1
+      ) : review2.deletes.filter(
+        (mark) => mark.from >= selected.from - 1 && mark.from <= selected.to + 1
+      );
+      const restoreText = relatedDeletes.map((mark) => mark.text).join("");
+      let from = selected.from;
+      let to = selected.to;
+      const doc = cm.state.doc.toString();
+      if (!restoreText) {
+        if (from > 0 && doc[from - 1] === " ") {
+          from--;
+        } else if (to < doc.length && doc[to] === " ") {
+          to++;
+        }
+      }
+      const deletedLength = to - from;
+      const insertedLength = restoreText.length;
+      const delta = insertedLength - deletedLength;
+      const nextInserts = [];
+      for (const mark of review2.inserts) {
+        const overlaps = mark.from < to && mark.to > from;
+        if (!overlaps) {
+          if (mark.to <= from) {
+            nextInserts.push({
+              from: mark.from,
+              to: mark.to
+            });
+          } else if (mark.from >= to) {
+            nextInserts.push({
+              from: mark.from + delta,
+              to: mark.to + delta
+            });
+          }
+          continue;
+        }
+        if (mark.from < from) {
+          nextInserts.push({
+            from: mark.from,
+            to: from
+          });
+        }
+        if (mark.to > to) {
+          nextInserts.push({
+            from: from + insertedLength,
+            to: mark.to + delta
+          });
+        }
+      }
+      const nextDeletes = review2.deletes.filter(
+        (mark) => !relatedDeletes.includes(mark)
+      ).map((mark) => ({
+        from: mark.from >= to ? mark.from + delta : mark.from,
+        text: mark.text
+      }));
       cm.dispatch({
-        effects: acceptChange.of({
-          type: "insert",
-          from: selected.from,
-          to: selected.to
+        changes: {
+          from,
+          to,
+          insert: restoreText
+        },
+        effects: internalChange.of()
+      });
+      cm.dispatch({
+        effects: setReviewState.of({
+          enabled: review2.enabled,
+          baseText: review2.baseText,
+          inserts: nextInserts,
+          deletes: nextDeletes
         })
       });
-      const updatedReview = this.getReviewState(cm);
-      if (updatedReview) {
-        cm.dispatch({
-          effects: setBaseText.of(
-            this.buildBaseTextFromCurrentState(
-              cm,
-              updatedReview
-            )
-          )
-        });
-      }
       this.saveCurrentState(cm);
-      this.refocusEditor(cm);
-      new import_obsidian.Notice("\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E");
+      this.refreshReadingMarks();
+      new import_obsidian.Notice("\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u043E");
       return;
     }
     if (selected.type === "delete") {
       const nextDeletes = review.deletes.filter(
-        (mark) => Math.abs(
-          mark.from - selected.from
-        ) > 2
+        (mark) => !(mark.from >= acceptFrom - 1 && mark.from <= acceptTo + 1)
       );
-      const nextState = {
+      const tempState = {
         enabled: review.enabled,
-        baseText: cm.state.doc.toString(),
+        baseText: review.baseText,
         inserts: [...review.inserts],
         deletes: nextDeletes
+      };
+      const nextState = {
+        ...tempState,
+        baseText: this.buildBaseTextFromCurrentState(
+          cm,
+          tempState
+        )
       };
       cm.dispatch({
         effects: setReviewState.of(nextState)
       });
-      this.saveCurrentState(cm);
+      const path = this.getFilePath();
+      if (path) {
+        this.reviewData[path] = {
+          enabled: nextState.enabled,
+          baseText: nextState.baseText,
+          inserts: [...nextState.inserts],
+          deletes: [...nextState.deletes]
+        };
+        this.saveData(this.reviewData);
+      }
       this.refocusEditor(cm);
+      this.refreshReadingMarks();
       new import_obsidian.Notice("\u0423\u0434\u0430\u043B\u0435\u043D\u0438\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E");
     }
   }
@@ -1132,6 +1235,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
         })
       });
       this.saveCurrentState(cm);
+      this.refreshReadingMarks();
       new import_obsidian.Notice("\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u043E");
       return;
     }
@@ -1159,6 +1263,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
         })
       });
       this.saveCurrentState(cm);
+      this.refreshReadingMarks();
       new import_obsidian.Notice("\u0423\u0434\u0430\u043B\u0435\u043D\u0438\u0435 \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u043E");
     }
   }
