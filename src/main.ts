@@ -902,32 +902,36 @@ this.refocusEditor(cm);
 
     if (selected.type === "insert") {
 
-        const nextInserts =
-            review.inserts.filter(mark =>
-                !(
-                    mark.from < selected.to &&
-                    mark.to > selected.from
-                )
-            );
+    cm.dispatch({
+        effects:
+            acceptChange.of({
+                type: "insert",
+                from: selected.from,
+                to: selected.to
+            })
+    });
 
-        const nextState: ReviewData = {
-            enabled: review.enabled,
-            baseText: cm.state.doc.toString(),
-            inserts: nextInserts,
-            deletes: [...review.deletes]
-        };
+    const updatedReview =
+        this.getReviewState(cm);
 
+    if (updatedReview) {
         cm.dispatch({
             effects:
-                setReviewState.of(nextState)
+                setBaseText.of(
+                    this.buildBaseTextFromCurrentState(
+                        cm,
+                        updatedReview
+                    )
+                )
         });
-
-        this.saveCurrentState(cm);
-        this.refocusEditor(cm);
-
-        new Notice("Добавление принято");
-        return;
     }
+
+    this.saveCurrentState(cm);
+    this.refocusEditor(cm);
+
+    new Notice("Добавление принято");
+    return;
+}
 
     if (selected.type === "delete") {
 
