@@ -267,7 +267,11 @@ var reviewState = import_state.StateField.define({
             const removedWasInsert = oldInserts.some(
               (mark) => fromA >= mark.from && toA <= mark.to
             );
-            if (!removedWasInsert) {
+            if (removedWasInsert) {
+              state.inserts = state.inserts.filter(
+                (mark) => mark.to > mark.from
+              );
+            } else {
               const removedText = tr.startState.doc.sliceString(
                 fromA,
                 toA
@@ -360,7 +364,6 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.reviewData = {};
-    this.saveTimer = null;
   }
   async onload() {
     const loaded = await this.loadData();
@@ -377,17 +380,8 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       )
     ]);
     this.registerMarkdownPostProcessor(
-      (el, ctx) => {
-        const apply = () => {
-          void this.renderReadingTableMarks(
-            el,
-            ctx.sourcePath
-          );
-        };
-        apply();
-        window.setTimeout(apply, 50);
-        window.setTimeout(apply, 200);
-        window.setTimeout(apply, 500);
+      () => {
+        this.refreshReadingMarks();
       }
     );
     this.registerEvent(
@@ -425,18 +419,12 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
           if (selected) {
             menu.addItem(
               (item) => item.setTitle("\u041F\u0440\u0438\u043D\u044F\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u043E\u0435 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0435").onClick(() => {
-                this.acceptSelectedChange(
-                  cm,
-                  selected
-                );
+                this.acceptSelectedChange(cm, selected);
               })
             );
             menu.addItem(
               (item) => item.setTitle("\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u043E\u0435 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u0435").onClick(() => {
-                this.rejectSelectedChange(
-                  cm,
-                  selected
-                );
+                this.rejectSelectedChange(cm, selected);
               })
             );
             menu.addSeparator();
@@ -470,32 +458,28 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       id: "review-enable",
       name: "\u0412\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0440\u0435\u0436\u0438\u043C \u0440\u0435\u0446\u0435\u043D\u0437\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u044F",
       editorCallback: (editor) => {
-        const cm = editor.cm;
-        this.enableReview(cm);
+        this.enableReview(editor.cm);
       }
     });
     this.addCommand({
       id: "review-disable",
       name: "\u041E\u0442\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0440\u0435\u0436\u0438\u043C \u0440\u0435\u0446\u0435\u043D\u0437\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u044F",
       editorCallback: (editor) => {
-        const cm = editor.cm;
-        this.disableReview(cm);
+        this.disableReview(editor.cm);
       }
     });
     this.addCommand({
       id: "review-accept-all",
       name: "\u041F\u0440\u0438\u043D\u044F\u0442\u044C \u0432\u0441\u0435 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F",
       editorCallback: (editor) => {
-        const cm = editor.cm;
-        this.acceptAll(cm);
+        this.acceptAll(editor.cm);
       }
     });
     this.addCommand({
       id: "review-reject-all",
       name: "\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C \u0432\u0441\u0435 \u0438\u0437\u043C\u0435\u043D\u0435\u043D\u0438\u044F",
       editorCallback: (editor) => {
-        const cm = editor.cm;
-        this.rejectAll(cm);
+        this.rejectAll(editor.cm);
       }
     });
     this.addCommand({
@@ -540,6 +524,11 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
   }
   rangesOverlap(from1, to1, from2, to2) {
     return from1 < to2 && to1 > from2;
+  }
+  getTextLinesForReview(text) {
+    return text.split("\n").map((line) => line.trim()).filter(
+      (line) => line.length > 0 && !line.includes("|")
+    );
   }
   getMarkdownTableRows(source) {
     const result = [];
@@ -590,30 +579,142 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     return result;
   }
   refreshReadingMarks() {
-    window.setTimeout(() => {
-      const view = this.app.workspace.getActiveViewOfType(
-        import_obsidian.MarkdownView
+    const refresh = () => {
+      const leaves = this.app.workspace.getLeavesOfType(
+        "markdown"
       );
-      const file = this.app.workspace.getActiveFile();
-      if (!view || !file) {
+      for (const leaf of leaves) {
+        const view = leaf.view;
+        const file = view.file;
+        if (!file) {
+          continue;
+        }
+        const container = view.contentEl;
+        if (!container) {
+          continue;
+        }
+        void this.renderReadingTableMarks(
+          container,
+          file.path
+        );
+      }
+    };
+    window.setTimeout(refresh, 50);
+    window.setTimeout(refresh, 200);
+    window.setTimeout(refresh, 500);
+  }
+  wrapReadingText(container, text) {
+    var _a;
+    const walker = document.createTreeWalker(
+      container,
+      NodeFilter.SHOW_TEXT
+    );
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest("table") || parent.closest(".review-reading-insert") || parent.closest(".review-reading-delete") || parent.closest(".review-reading-table-delete")) {
+        continue;
+      }
+      const value = (_a = node.nodeValue) != null ? _a : "";
+      const index = value.indexOf(text);
+      if (index === -1) {
+        continue;
+      }
+      const range = document.createRange();
+      range.setStart(node, index);
+      range.setEnd(
+        node,
+        index + text.length
+      );
+      const span = document.createElement("span");
+      span.className = "review-insert review-reading-insert";
+      range.surroundContents(span);
+      return;
+    }
+    const blocks = Array.from(
+      container.querySelectorAll(
+        "p, li, h1, h2, h3, h4, h5, h6"
+      )
+    );
+    for (const block of blocks) {
+      if (block.closest("table") || block.classList.contains("review-reading-insert")) {
+        continue;
+      }
+      if (block.innerText.includes(text)) {
+        block.classList.add(
+          "review-insert",
+          "review-reading-insert"
+        );
         return;
       }
-      const container = view.contentEl;
-      if (!container) {
-        return;
+    }
+  }
+  wrapReadingTextOccurrence(container, text, occurrence) {
+    var _a;
+    let current = 0;
+    const walker = document.createTreeWalker(
+      container,
+      NodeFilter.SHOW_TEXT
+    );
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest("table") || parent.closest(".review-reading-insert") || parent.closest(".review-reading-delete") || parent.closest(".review-reading-table-delete")) {
+        continue;
       }
-      void this.renderReadingTableMarks(
-        container,
-        file.path
-      );
-    }, 100);
+      const value = (_a = node.nodeValue) != null ? _a : "";
+      let index = value.indexOf(text);
+      while (index !== -1) {
+        current++;
+        if (current === occurrence) {
+          const range = document.createRange();
+          range.setStart(node, index);
+          range.setEnd(
+            node,
+            index + text.length
+          );
+          const span = document.createElement("span");
+          span.className = "review-insert review-reading-insert";
+          range.surroundContents(span);
+          return;
+        }
+        index = value.indexOf(
+          text,
+          index + text.length
+        );
+      }
+    }
+  }
+  getTextParagraphsForReview(text) {
+    const paragraphs = [];
+    let current = [];
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        if (current.length > 0) {
+          paragraphs.push(current);
+          current = [];
+        }
+        continue;
+      }
+      if (trimmed.includes("|") || trimmed.startsWith("#")) {
+        if (current.length > 0) {
+          paragraphs.push(current);
+          current = [];
+        }
+        continue;
+      }
+      current.push(trimmed);
+    }
+    if (current.length > 0) {
+      paragraphs.push(current);
+    }
+    return paragraphs;
   }
   async renderReadingTableMarks(el, sourcePath) {
-    var _a, _b, _c, _d;
+    var _a;
     const container = el;
-    container.querySelectorAll(
-      ".review-reading-insert"
-    ).forEach((node) => {
+    container.querySelectorAll(".review-reading-insert").forEach((node) => {
       var _a2;
       node.replaceWith(
         document.createTextNode(
@@ -625,6 +726,14 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       ".review-reading-delete, .review-reading-table-delete"
     ).forEach(
       (node) => node.remove()
+    );
+    container.querySelectorAll(
+      ".review-reading-line"
+    ).forEach(
+      (node) => node.classList.remove(
+        "review-insert",
+        "review-reading-line"
+      )
     );
     const renderedCells = Array.from(
       container.querySelectorAll(
@@ -649,6 +758,11 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     }
     const source = await this.app.vault.read(file);
     const markdownRows = this.getMarkdownTableRows(source);
+    const isDeleteInsideTable = (position2) => markdownRows.some(
+      (row) => row.cells.some(
+        (cell) => position2 >= cell.from - 1 && position2 <= cell.to + 1
+      )
+    );
     const renderedRows = Array.from(
       container.querySelectorAll("table tr")
     );
@@ -694,81 +808,120 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
         }
       }
     }
-    for (const mark of review.inserts) {
-      const insertedText = source.slice(mark.from, mark.to).trim();
-      if (!insertedText || insertedText.includes("|")) {
+    const paragraphs = [];
+    let currentParagraph = null;
+    let position = 0;
+    for (const rawLine of source.split("\n")) {
+      const lineFrom = position;
+      const lineTo = position + rawLine.length;
+      const lineText = rawLine.trim();
+      const isTextLine = lineText.length > 0 && !rawLine.includes("|");
+      if (!isTextLine) {
+        if (currentParagraph) {
+          paragraphs.push(currentParagraph);
+          currentParagraph = null;
+        }
+        position = lineTo + 1;
         continue;
       }
-      const walker = document.createTreeWalker(
-        container,
-        NodeFilter.SHOW_TEXT
-      );
-      while (walker.nextNode()) {
-        const node = walker.currentNode;
-        if ((_a = node.parentElement) == null ? void 0 : _a.closest("table")) {
-          continue;
+      if (!currentParagraph) {
+        currentParagraph = {
+          from: lineFrom,
+          to: lineTo,
+          lines: []
+        };
+      }
+      currentParagraph.to = lineTo;
+      currentParagraph.lines.push({
+        from: lineFrom,
+        to: lineTo,
+        text: lineText
+      });
+      position = lineTo + 1;
+    }
+    if (currentParagraph) {
+      paragraphs.push(currentParagraph);
+    }
+    const blocks = Array.from(
+      container.querySelectorAll(
+        "p, li, h1, h2, h3, h4, h5, h6"
+      )
+    ).filter(
+      (block) => !block.closest("table")
+    );
+    const renderedDeleteMarks = /* @__PURE__ */ new Set();
+    for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex++) {
+      const paragraph = paragraphs[paragraphIndex];
+      const block = blocks[paragraphIndex];
+      if (!block) {
+        continue;
+      }
+      block.replaceChildren();
+      let hasRenderedLine = false;
+      const appendLineBreak = () => {
+        if (hasRenderedLine) {
+          block.appendChild(
+            document.createElement("br")
+          );
         }
-        const value = (_b = node.nodeValue) != null ? _b : "";
-        const index = value.indexOf(insertedText);
-        if (index === -1) {
-          continue;
+        hasRenderedLine = true;
+      };
+      for (const line of paragraph.lines) {
+        const deletesBeforeLine = review.deletes.filter(
+          (mark, index) => !renderedDeleteMarks.has(index) && !isDeleteInsideTable(mark.from) && mark.from <= line.from
+        );
+        for (const deleted of deletesBeforeLine) {
+          appendLineBreak();
+          const span2 = document.createElement("span");
+          span2.className = "review-delete review-reading-delete";
+          span2.textContent = deleted.text.trim();
+          block.appendChild(span2);
+          renderedDeleteMarks.add(
+            review.deletes.indexOf(deleted)
+          );
         }
-        const range = document.createRange();
-        range.setStart(node, index);
-        range.setEnd(
-          node,
-          index + insertedText.length
+        appendLineBreak();
+        const lineHasInsert = review.inserts.some(
+          (mark) => this.rangesOverlap(
+            mark.from,
+            mark.to,
+            line.from,
+            line.to
+          )
         );
         const span = document.createElement("span");
-        span.className = "review-insert review-reading-insert";
-        range.surroundContents(span);
-        break;
+        span.textContent = line.text;
+        if (lineHasInsert) {
+          span.className = "review-insert review-reading-insert";
+        }
+        block.appendChild(span);
+        const deletesInLine = review.deletes.filter(
+          (mark, index) => !renderedDeleteMarks.has(index) && !isDeleteInsideTable(mark.from) && mark.from > line.from && mark.from <= line.to
+        );
+        for (const deleted of deletesInLine) {
+          const deleteSpan = document.createElement("span");
+          deleteSpan.className = "review-delete review-reading-delete";
+          deleteSpan.textContent = " " + deleted.text.trim();
+          block.appendChild(deleteSpan);
+          renderedDeleteMarks.add(
+            review.deletes.indexOf(deleted)
+          );
+        }
       }
     }
-    for (const mark of review.deletes) {
-      const deletedText = mark.text.trim();
-      if (!deletedText) {
-        continue;
-      }
-      const isInsideTable = markdownRows.some(
-        (row) => row.cells.some(
-          (cell) => mark.from >= cell.from - 1 && mark.from <= cell.to + 1
-        )
-      );
-      if (isInsideTable) {
-        continue;
-      }
-      const beforeText = source.slice(0, mark.from).trim();
-      const beforeWords = beforeText.split(/\s+/);
-      const anchor = beforeWords[beforeWords.length - 1];
-      if (!anchor) {
-        continue;
-      }
-      const walker = document.createTreeWalker(
-        container,
-        NodeFilter.SHOW_TEXT
-      );
-      while (walker.nextNode()) {
-        const node = walker.currentNode;
-        if ((_c = node.parentElement) == null ? void 0 : _c.closest("table")) {
-          continue;
-        }
-        const value = (_d = node.nodeValue) != null ? _d : "";
-        const index = value.lastIndexOf(anchor);
-        if (index === -1) {
-          continue;
-        }
+    const remainingDeletes = review.deletes.filter(
+      (mark, index) => !renderedDeleteMarks.has(index) && !isDeleteInsideTable(mark.from) && mark.text.trim().length > 0
+    );
+    if (remainingDeletes.length > 0) {
+      const target = (_a = blocks[blocks.length - 1]) != null ? _a : container;
+      for (const deleted of remainingDeletes) {
         const span = document.createElement("span");
         span.className = "review-delete review-reading-delete";
-        span.textContent = " " + deletedText;
-        const range = document.createRange();
-        range.setStart(
-          node,
-          index + anchor.length
+        span.textContent = deleted.text.trim();
+        target.appendChild(
+          document.createElement("br")
         );
-        range.collapse(true);
-        range.insertNode(span);
-        break;
+        target.appendChild(span);
       }
     }
   }
@@ -791,15 +944,6 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     } catch (e) {
       return null;
     }
-  }
-  scheduleSaveData() {
-    if (this.saveTimer !== null) {
-      window.clearTimeout(this.saveTimer);
-    }
-    this.saveTimer = window.setTimeout(() => {
-      this.saveData(this.reviewData);
-      this.saveTimer = null;
-    }, 300);
   }
   saveCurrentState(cm) {
     const path = this.getFilePath();
@@ -828,16 +972,6 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     }
     const review = this.getReviewState(update.view);
     if (!review) {
-      return;
-    }
-    const existing = this.reviewData[path];
-    const reviewIsEmpty = !review.enabled && review.baseText === "" && review.inserts.length === 0 && review.deletes.length === 0;
-    const existingHasReview = existing && (existing.enabled || existing.inserts.length > 0 || existing.deletes.length > 0);
-    if (reviewIsEmpty && existingHasReview && !update.docChanged) {
-      console.log(
-        "SKIP EMPTY AUTO SAVE",
-        path
-      );
       return;
     }
     this.reviewData[path] = {
@@ -1108,22 +1242,6 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       };
     }
     return null;
-  }
-  buildBaseTextFromCurrentState(cm, review) {
-    let text = cm.state.doc.toString();
-    const inserts = [...review.inserts].sort(
-      (a, b) => b.from - a.from
-    );
-    for (const mark of inserts) {
-      text = text.slice(0, mark.from) + text.slice(mark.to);
-    }
-    const deletes = [...review.deletes].sort(
-      (a, b) => b.from - a.from
-    );
-    for (const mark of deletes) {
-      text = text.slice(0, mark.from) + mark.text + text.slice(mark.from);
-    }
-    return text;
   }
   acceptSelectedChange(cm, selected) {
     const review = this.getReviewState(cm);
