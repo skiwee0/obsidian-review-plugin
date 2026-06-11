@@ -609,8 +609,25 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     }, 100);
   }
   async renderReadingTableMarks(el, sourcePath) {
+    var _a, _b, _c, _d;
+    const container = el;
+    container.querySelectorAll(
+      ".review-reading-insert"
+    ).forEach((node) => {
+      var _a2;
+      node.replaceWith(
+        document.createTextNode(
+          (_a2 = node.textContent) != null ? _a2 : ""
+        )
+      );
+    });
+    container.querySelectorAll(
+      ".review-reading-delete, .review-reading-table-delete"
+    ).forEach(
+      (node) => node.remove()
+    );
     const renderedCells = Array.from(
-      el.querySelectorAll(
+      container.querySelectorAll(
         "table th, table td"
       )
     );
@@ -619,11 +636,6 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
         "review-reading-table-cell"
       );
       cell.style.backgroundColor = "";
-      cell.querySelectorAll(
-        ".review-reading-delete"
-      ).forEach(
-        (node) => node.remove()
-      );
     }
     const review = this.reviewData[sourcePath];
     if (!review) {
@@ -638,7 +650,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     const source = await this.app.vault.read(file);
     const markdownRows = this.getMarkdownTableRows(source);
     const renderedRows = Array.from(
-      el.querySelectorAll("table tr")
+      container.querySelectorAll("table tr")
     );
     for (let rowIndex = 0; rowIndex < renderedRows.length; rowIndex++) {
       const markdownRow = markdownRows[rowIndex];
@@ -676,10 +688,87 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
         );
         for (const deleted of deletes) {
           const span = document.createElement("span");
-          span.className = "review-delete review-reading-delete";
+          span.className = "review-delete review-reading-table-delete";
           span.textContent = deleted.text;
           renderedCell.appendChild(span);
         }
+      }
+    }
+    for (const mark of review.inserts) {
+      const insertedText = source.slice(mark.from, mark.to).trim();
+      if (!insertedText || insertedText.includes("|")) {
+        continue;
+      }
+      const walker = document.createTreeWalker(
+        container,
+        NodeFilter.SHOW_TEXT
+      );
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if ((_a = node.parentElement) == null ? void 0 : _a.closest("table")) {
+          continue;
+        }
+        const value = (_b = node.nodeValue) != null ? _b : "";
+        const index = value.indexOf(insertedText);
+        if (index === -1) {
+          continue;
+        }
+        const range = document.createRange();
+        range.setStart(node, index);
+        range.setEnd(
+          node,
+          index + insertedText.length
+        );
+        const span = document.createElement("span");
+        span.className = "review-insert review-reading-insert";
+        range.surroundContents(span);
+        break;
+      }
+    }
+    for (const mark of review.deletes) {
+      const deletedText = mark.text.trim();
+      if (!deletedText) {
+        continue;
+      }
+      const isInsideTable = markdownRows.some(
+        (row) => row.cells.some(
+          (cell) => mark.from >= cell.from - 1 && mark.from <= cell.to + 1
+        )
+      );
+      if (isInsideTable) {
+        continue;
+      }
+      const beforeText = source.slice(0, mark.from).trim();
+      const beforeWords = beforeText.split(/\s+/);
+      const anchor = beforeWords[beforeWords.length - 1];
+      if (!anchor) {
+        continue;
+      }
+      const walker = document.createTreeWalker(
+        container,
+        NodeFilter.SHOW_TEXT
+      );
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if ((_c = node.parentElement) == null ? void 0 : _c.closest("table")) {
+          continue;
+        }
+        const value = (_d = node.nodeValue) != null ? _d : "";
+        const index = value.lastIndexOf(anchor);
+        if (index === -1) {
+          continue;
+        }
+        const span = document.createElement("span");
+        span.className = "review-delete review-reading-delete";
+        span.textContent = " " + deletedText;
+        const range = document.createRange();
+        range.setStart(
+          node,
+          index + anchor.length
+        );
+        range.collapse(true);
+        range.insertNode(span);
+        break;
       }
     }
   }
@@ -1048,106 +1137,45 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     const acceptFrom = cellRange ? cellRange.from : selected.from;
     const acceptTo = cellRange ? cellRange.to : selected.to;
     if (selected.type === "insert") {
-      const review2 = this.getReviewState(cm);
-      if (!review2) {
-        return;
-      }
-      const cellRange2 = this.getTableCellRange(
-        cm,
-        selected.from
+      const nextInserts = review.inserts.filter(
+        (mark) => !(mark.from < acceptTo && mark.to > acceptFrom)
       );
-      const relatedDeletes = cellRange2 ? review2.deletes.filter(
-        (mark) => mark.from >= cellRange2.from - 1 && mark.from <= cellRange2.to + 1
-      ) : review2.deletes.filter(
-        (mark) => mark.from >= selected.from - 1 && mark.from <= selected.to + 1
+      const nextDeletes = review.deletes.filter(
+        (mark) => !(mark.from >= acceptFrom - 1 && mark.from <= acceptTo + 1)
       );
-      const restoreText = relatedDeletes.map((mark) => mark.text).join("");
-      let from = selected.from;
-      let to = selected.to;
-      const doc = cm.state.doc.toString();
-      if (!restoreText) {
-        if (from > 0 && doc[from - 1] === " ") {
-          from--;
-        } else if (to < doc.length && doc[to] === " ") {
-          to++;
-        }
-      }
-      const deletedLength = to - from;
-      const insertedLength = restoreText.length;
-      const delta = insertedLength - deletedLength;
-      const nextInserts = [];
-      for (const mark of review2.inserts) {
-        const overlaps = mark.from < to && mark.to > from;
-        if (!overlaps) {
-          if (mark.to <= from) {
-            nextInserts.push({
-              from: mark.from,
-              to: mark.to
-            });
-          } else if (mark.from >= to) {
-            nextInserts.push({
-              from: mark.from + delta,
-              to: mark.to + delta
-            });
-          }
-          continue;
-        }
-        if (mark.from < from) {
-          nextInserts.push({
-            from: mark.from,
-            to: from
-          });
-        }
-        if (mark.to > to) {
-          nextInserts.push({
-            from: from + insertedLength,
-            to: mark.to + delta
-          });
-        }
-      }
-      const nextDeletes = review2.deletes.filter(
-        (mark) => !relatedDeletes.includes(mark)
-      ).map((mark) => ({
-        from: mark.from >= to ? mark.from + delta : mark.from,
-        text: mark.text
-      }));
+      const nextState = {
+        enabled: review.enabled,
+        baseText: cm.state.doc.toString(),
+        inserts: nextInserts,
+        deletes: nextDeletes
+      };
       cm.dispatch({
-        changes: {
-          from,
-          to,
-          insert: restoreText
-        },
-        effects: internalChange.of()
+        effects: setReviewState.of(nextState)
       });
-      cm.dispatch({
-        effects: setReviewState.of({
-          enabled: review2.enabled,
-          baseText: review2.baseText,
-          inserts: nextInserts,
-          deletes: nextDeletes
-        })
-      });
-      this.saveCurrentState(cm);
+      const path = this.getFilePath();
+      if (path) {
+        this.reviewData[path] = {
+          enabled: nextState.enabled,
+          baseText: nextState.baseText,
+          inserts: [...nextState.inserts],
+          deletes: [...nextState.deletes]
+        };
+        this.saveData(this.reviewData);
+      }
+      this.refocusEditor(cm);
       this.refreshReadingMarks();
-      new import_obsidian.Notice("\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043E\u0442\u043C\u0435\u043D\u0435\u043D\u043E");
+      new import_obsidian.Notice("\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043F\u0440\u0438\u043D\u044F\u0442\u043E");
       return;
     }
     if (selected.type === "delete") {
       const nextDeletes = review.deletes.filter(
         (mark) => !(mark.from >= acceptFrom - 1 && mark.from <= acceptTo + 1)
       );
-      const tempState = {
+      const nextState = {
         enabled: review.enabled,
-        baseText: review.baseText,
+        baseText: cm.state.doc.toString(),
         inserts: [...review.inserts],
         deletes: nextDeletes
-      };
-      const nextState = {
-        ...tempState,
-        baseText: this.buildBaseTextFromCurrentState(
-          cm,
-          tempState
-        )
       };
       cm.dispatch({
         effects: setReviewState.of(nextState)
