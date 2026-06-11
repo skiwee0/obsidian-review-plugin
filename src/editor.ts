@@ -450,25 +450,30 @@ if (
 }
 
                         if (removedLength > 0) {
-                            const removedWasInsert =
-                                oldInserts.some(mark =>
-                                    fromA >= mark.from &&
-                                    toA <= mark.to
-                                );
+    const removedWasInsert =
+        oldInserts.some(mark =>
+            fromA >= mark.from &&
+            toA <= mark.to
+        );
 
-                            if (!removedWasInsert) {
-                                const removedText =
-                                    tr.startState.doc.sliceString(
-                                        fromA,
-                                        toA
-                                    );
+    if (removedWasInsert) {
+    state.inserts =
+        state.inserts.filter(mark =>
+            mark.to > mark.from
+        );
+} else {
+        const removedText =
+            tr.startState.doc.sliceString(
+                fromA,
+                toA
+            );
 
-                                state.deletes.push({
-                                    from: fromB,
-                                    text: removedText
-                                });
-                            }
-                        }
+        state.deletes.push({
+            from: fromB,
+            text: removedText
+        });
+    }
+}
                     }
                 );
             }
