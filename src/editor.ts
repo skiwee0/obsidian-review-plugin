@@ -2,7 +2,8 @@ import {
     ChangeSet,
     RangeSetBuilder,
     StateEffect,
-    StateField
+    StateField,
+    Transaction
 } from "@codemirror/state";
 
 import {
@@ -150,17 +151,36 @@ class DeletedTextWidget extends WidgetType {
     }
 
     toDOM() {
+    const wrapper =
+        document.createElement("span");
+
+    wrapper.className =
+        "review-delete";
+
+    wrapper.style.whiteSpace =
+        "pre-wrap";
+
+    const parts =
+        this.text.split(/\r?\n/);
+
+    for (let i = 0; i < parts.length; i++) {
+        if (i > 0) {
+            wrapper.appendChild(
+                document.createElement("br")
+            );
+        }
+
         const span =
             document.createElement("span");
 
-        span.className =
-            "review-delete";
-
         span.textContent =
-            this.text;
+            parts[i];
 
-        return span;
+        wrapper.appendChild(span);
     }
+
+    return wrapper;
+}
 }
 
 function mapInsertMarks(
@@ -197,7 +217,7 @@ function mapDeleteMarks(
             mark.from <= oldDocLength
         )
         .map(mark => ({
-            from: changes.mapPos(mark.from),
+            from: changes.mapPos(mark.from, -1),
             text: mark.text
         }))
         .filter(mark =>
@@ -258,6 +278,13 @@ export const reviewState =
 
             const oldInserts =
                 [...state.inserts];
+
+                const isUndo =
+    tr.isUserEvent("undo") ||
+    tr.isUserEvent("history.undo");
+
+                const oldDeletes =
+    [...state.deletes];
 
             if (
     tr.docChanged &&
@@ -425,8 +452,40 @@ if (
 
                         if (insertedLength > 0) {
 
-    const insertedText =
-        inserted.toString();
+                            const insertedText =
+    inserted.toString();
+
+    const normalizedInserted =
+    insertedText.trim();
+
+const restoredFromBase =
+    normalizedInserted.length > 0 &&
+    state.baseText.includes(normalizedInserted);
+
+if (
+    isUndo &&
+    restoredFromBase
+) {
+    return;
+}
+
+    const restoredDelete =
+    oldDeletes.find(mark =>
+        mark.text === insertedText &&
+        Math.abs(mark.from - fromB) <= insertedText.length + 2
+    );
+
+if (isUndo && restoredDelete) {
+    state.deletes =
+        state.deletes.filter(mark =>
+            !(
+                mark.text === insertedText &&
+                Math.abs(mark.from - fromB) <= insertedText.length + 2
+            )
+        );
+
+    return;
+}
 
     const last =
         state.inserts[
