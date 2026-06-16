@@ -85,10 +85,21 @@ var DeletedTextWidget = class extends import_view.WidgetType {
     this.text = text;
   }
   toDOM() {
-    const span = document.createElement("span");
-    span.className = "review-delete";
-    span.textContent = this.text;
-    return span;
+    const wrapper = document.createElement("span");
+    wrapper.className = "review-delete";
+    wrapper.style.whiteSpace = "pre-wrap";
+    const parts = this.text.split(/\r?\n/);
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0) {
+        wrapper.appendChild(
+          document.createElement("br")
+        );
+      }
+      const span = document.createElement("span");
+      span.textContent = parts[i];
+      wrapper.appendChild(span);
+    }
+    return wrapper;
   }
 };
 function mapInsertMarks(inserts, changes, oldDocLength) {
@@ -105,7 +116,7 @@ function mapDeleteMarks(deletes, changes, oldDocLength) {
   return deletes.filter(
     (mark) => mark.from >= 0 && mark.from <= oldDocLength
   ).map((mark) => ({
-    from: changes.mapPos(mark.from),
+    from: changes.mapPos(mark.from, -1),
     text: mark.text
   })).filter(
     (mark) => mark.from >= 0
@@ -147,6 +158,8 @@ var reviewState = import_state.StateField.define({
       (effect) => effect.is(rejectAllChanges)
     );
     const oldInserts = [...state.inserts];
+    const isUndo = tr.isUserEvent("undo") || tr.isUserEvent("history.undo");
+    const oldDeletes = [...state.deletes];
     if (tr.docChanged && !isRejectAll && state.enabled) {
       const oldDocLength = tr.startState.doc.length;
       state.inserts = mapInsertMarks(
@@ -252,6 +265,20 @@ var reviewState = import_state.StateField.define({
           const removedLength = toA - fromA;
           if (insertedLength > 0) {
             const insertedText = inserted.toString();
+            const normalizedInserted = insertedText.trim();
+            const restoredFromBase = normalizedInserted.length > 0 && state.baseText.includes(normalizedInserted);
+            if (isUndo && restoredFromBase) {
+              return;
+            }
+            const restoredDelete = oldDeletes.find(
+              (mark) => mark.text === insertedText && Math.abs(mark.from - fromB) <= insertedText.length + 2
+            );
+            if (isUndo && restoredDelete) {
+              state.deletes = state.deletes.filter(
+                (mark) => !(mark.text === insertedText && Math.abs(mark.from - fromB) <= insertedText.length + 2)
+              );
+              return;
+            }
             const last = state.inserts[state.inserts.length - 1];
             const shouldMerge = last && last.to === fromB && !insertedText.includes("\n") && !insertedText.includes("|");
             if (shouldMerge) {
@@ -364,6 +391,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.reviewData = {};
+    this.readingRefreshTimer = null;
   }
   async onload() {
     const loaded = await this.loadData();
@@ -579,7 +607,11 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     return result;
   }
   refreshReadingMarks() {
-    const refresh = () => {
+    if (this.readingRefreshTimer !== null) {
+      window.clearTimeout(this.readingRefreshTimer);
+    }
+    this.readingRefreshTimer = window.setTimeout(() => {
+      this.readingRefreshTimer = null;
       const leaves = this.app.workspace.getLeavesOfType(
         "markdown"
       );
@@ -598,10 +630,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
           file.path
         );
       }
-    };
-    window.setTimeout(refresh, 50);
-    window.setTimeout(refresh, 200);
-    window.setTimeout(refresh, 500);
+    }, 150);
   }
   wrapReadingText(container, text) {
     var _a;
@@ -849,6 +878,47 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     ).filter(
       (block) => !block.closest("table")
     );
+    const appendDeletedText = (parent, text, prefix = "") => {
+      const parts = text.trim().split(/\r?\n/);
+      for (let i = 0; i < parts.length; i++) {
+        if (i > 0) {
+          parent.appendChild(
+            document.createElement("br")
+          );
+        }
+        const span = document.createElement("span");
+        span.className = "review-delete review-reading-delete";
+        span.textContent = (i === 0 ? prefix : "") + parts[i];
+        parent.appendChild(span);
+      }
+    };
+    const appendTextWithInserts = (parent, from, to) => {
+      if (to <= from) {
+        return;
+      }
+      const inserts = review.inserts.map((mark) => ({
+        from: Math.max(mark.from, from),
+        to: Math.min(mark.to, to)
+      })).filter((mark) => mark.to > mark.from).sort((a, b) => a.from - b.from);
+      let cursor = from;
+      for (const insert of inserts) {
+        if (cursor < insert.from) {
+          const normalSpan = document.createElement("span");
+          normalSpan.textContent = source.slice(cursor, insert.from);
+          parent.appendChild(normalSpan);
+        }
+        const insertSpan = document.createElement("span");
+        insertSpan.className = "review-insert review-reading-insert";
+        insertSpan.textContent = source.slice(insert.from, insert.to);
+        parent.appendChild(insertSpan);
+        cursor = insert.to;
+      }
+      if (cursor < to) {
+        const normalSpan = document.createElement("span");
+        normalSpan.textContent = source.slice(cursor, to);
+        parent.appendChild(normalSpan);
+      }
+    };
     const renderedDeleteMarks = /* @__PURE__ */ new Set();
     for (let paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex++) {
       const paragraph = paragraphs[paragraphIndex];
@@ -868,45 +938,60 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       };
       for (const line of paragraph.lines) {
         const deletesBeforeLine = review.deletes.filter(
-          (mark, index) => !renderedDeleteMarks.has(index) && !isDeleteInsideTable(mark.from) && mark.from <= line.from
+          (mark, index) => !renderedDeleteMarks.has(index) && !isDeleteInsideTable(mark.from) && mark.from < line.from
         );
+        let hadDeleteBeforeLine = false;
         for (const deleted of deletesBeforeLine) {
           appendLineBreak();
-          const span2 = document.createElement("span");
-          span2.className = "review-delete review-reading-delete";
-          span2.textContent = deleted.text.trim();
-          block.appendChild(span2);
+          appendDeletedText(
+            block,
+            deleted.text
+          );
           renderedDeleteMarks.add(
             review.deletes.indexOf(deleted)
           );
+          hadDeleteBeforeLine = true;
         }
-        appendLineBreak();
-        const lineHasInsert = review.inserts.some(
-          (mark) => this.rangesOverlap(
-            mark.from,
-            mark.to,
-            line.from,
-            line.to
-          )
-        );
-        const span = document.createElement("span");
-        span.textContent = line.text;
-        if (lineHasInsert) {
-          span.className = "review-insert review-reading-insert";
+        if (hadDeleteBeforeLine) {
+          block.appendChild(
+            document.createElement("br")
+          );
+        } else {
+          appendLineBreak();
         }
-        block.appendChild(span);
-        const deletesInLine = review.deletes.filter(
-          (mark, index) => !renderedDeleteMarks.has(index) && !isDeleteInsideTable(mark.from) && mark.from > line.from && mark.from <= line.to
+        const deletesInLine = review.deletes.map((mark, index) => ({
+          ...mark,
+          index
+        })).filter(
+          (mark) => !renderedDeleteMarks.has(mark.index) && !isDeleteInsideTable(mark.from) && mark.from >= line.from && mark.from <= line.to
+        ).sort(
+          (a, b) => a.from - b.from
         );
+        let cursor = line.from;
         for (const deleted of deletesInLine) {
-          const deleteSpan = document.createElement("span");
-          deleteSpan.className = "review-delete review-reading-delete";
-          deleteSpan.textContent = " " + deleted.text.trim();
-          block.appendChild(deleteSpan);
-          renderedDeleteMarks.add(
-            review.deletes.indexOf(deleted)
+          const deletePosition = Math.max(
+            line.from,
+            Math.min(deleted.from, line.to)
           );
+          appendTextWithInserts(
+            block,
+            cursor,
+            deletePosition
+          );
+          appendDeletedText(
+            block,
+            deleted.text
+          );
+          renderedDeleteMarks.add(
+            deleted.index
+          );
+          cursor = deletePosition;
         }
+        appendTextWithInserts(
+          block,
+          cursor,
+          line.to
+        );
       }
     }
     const remainingDeletes = review.deletes.filter(
@@ -915,13 +1000,13 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     if (remainingDeletes.length > 0) {
       const target = (_a = blocks[blocks.length - 1]) != null ? _a : container;
       for (const deleted of remainingDeletes) {
-        const span = document.createElement("span");
-        span.className = "review-delete review-reading-delete";
-        span.textContent = deleted.text.trim();
         target.appendChild(
           document.createElement("br")
         );
-        target.appendChild(span);
+        appendDeletedText(
+          target,
+          deleted.text
+        );
       }
     }
   }
@@ -1224,10 +1309,18 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       (mark) => searchFrom < mark.to && searchTo > mark.from
     );
     if (insert) {
+      if (selection.empty) {
+        const line = cm.state.doc.lineAt(searchFrom);
+        return {
+          type: "insert",
+          from: Math.max(line.from, insert.from),
+          to: Math.min(line.to, insert.to)
+        };
+      }
       return {
         type: "insert",
-        from: selection.empty ? Math.max(searchFrom, insert.from) : searchFrom,
-        to: selection.empty ? Math.min(searchTo, insert.to) : searchTo
+        from: Math.max(searchFrom, insert.from),
+        to: Math.min(searchTo, insert.to)
       };
     }
     const deleteMark = review.deletes.find(
@@ -1255,9 +1348,26 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
     const acceptFrom = cellRange ? cellRange.from : selected.from;
     const acceptTo = cellRange ? cellRange.to : selected.to;
     if (selected.type === "insert") {
-      const nextInserts = review.inserts.filter(
-        (mark) => !(mark.from < acceptTo && mark.to > acceptFrom)
-      );
+      const nextInserts = [];
+      for (const mark of review.inserts) {
+        const overlaps = mark.from < acceptTo && mark.to > acceptFrom;
+        if (!overlaps) {
+          nextInserts.push(mark);
+          continue;
+        }
+        if (mark.from < acceptFrom) {
+          nextInserts.push({
+            from: mark.from,
+            to: acceptFrom
+          });
+        }
+        if (mark.to > acceptTo) {
+          nextInserts.push({
+            from: acceptTo,
+            to: mark.to
+          });
+        }
+      }
       const nextDeletes = review.deletes.filter(
         (mark) => !(mark.from >= acceptFrom - 1 && mark.from <= acceptTo + 1)
       );
@@ -1291,7 +1401,7 @@ var ReviewPlugin = class extends import_obsidian.Plugin {
       );
       const nextState = {
         enabled: review.enabled,
-        baseText: cm.state.doc.toString(),
+        baseText: review.baseText,
         inserts: [...review.inserts],
         deletes: nextDeletes
       };
