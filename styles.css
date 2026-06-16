@@ -31,3 +31,14 @@
     display: table !important;
     width: auto !important;
 }
+.review-delete,
+.review-reading-delete,
+.review-reading-table-delete {
+    white-space: pre-wrap !important;
+}
+
+.review-delete,
+.review-reading-delete,
+.review-reading-table-delete {
+    white-space: pre-wrap !important;
+}
