@@ -29,6 +29,8 @@ export default class ReviewPlugin extends Plugin {
 
     private reviewData: StoredReviewData = {};
 
+    private readingRefreshTimer: number | null = null;
+
     async onload() {
 
         const loaded =
@@ -375,43 +377,45 @@ export default class ReviewPlugin extends Plugin {
 
     private refreshReadingMarks() {
 
-        const refresh = () => {
-
-            const leaves =
-                this.app.workspace.getLeavesOfType(
-                    "markdown"
-                );
-
-            for (const leaf of leaves) {
-
-                const view =
-                    leaf.view as MarkdownView;
-
-                const file =
-                    view.file;
-
-                if (!file) {
-                    continue;
-                }
-
-                const container =
-                    (view as any).contentEl as HTMLElement;
-
-                if (!container) {
-                    continue;
-                }
-
-                void this.renderReadingTableMarks(
-                    container,
-                    file.path
-                );
-            }
-        };
-
-        window.setTimeout(refresh, 50);
-        window.setTimeout(refresh, 200);
-        window.setTimeout(refresh, 500);
+    if (this.readingRefreshTimer !== null) {
+        window.clearTimeout(this.readingRefreshTimer);
     }
+
+    this.readingRefreshTimer = window.setTimeout(() => {
+
+        this.readingRefreshTimer = null;
+
+        const leaves =
+            this.app.workspace.getLeavesOfType(
+                "markdown"
+            );
+
+        for (const leaf of leaves) {
+
+            const view =
+                leaf.view as MarkdownView;
+
+            const file =
+                view.file;
+
+            if (!file) {
+                continue;
+            }
+
+            const container =
+                (view as any).contentEl as HTMLElement;
+
+            if (!container) {
+                continue;
+            }
+
+            void this.renderReadingTableMarks(
+                container,
+                file.path
+            );
+        }
+    }, 150);
+}
 
     private wrapReadingText(
     container: HTMLElement,
@@ -868,6 +872,92 @@ private getTextParagraphsForReview(
                 !block.closest("table")
             ) as HTMLElement[];
 
+            const appendDeletedText = (
+    parent: HTMLElement,
+    text: string,
+    prefix = ""
+) => {
+    const parts =
+        text.trim().split(/\r?\n/);
+
+    for (let i = 0; i < parts.length; i++) {
+        if (i > 0) {
+            parent.appendChild(
+                document.createElement("br")
+            );
+        }
+
+        const span =
+            document.createElement("span");
+
+        span.className =
+            "review-delete review-reading-delete";
+
+        span.textContent =
+            (i === 0 ? prefix : "") + parts[i];
+
+        parent.appendChild(span);
+    }
+};
+
+const appendTextWithInserts = (
+    parent: HTMLElement,
+    from: number,
+    to: number
+) => {
+    if (to <= from) {
+        return;
+    }
+
+    const inserts =
+        review.inserts
+            .map(mark => ({
+                from: Math.max(mark.from, from),
+                to: Math.min(mark.to, to)
+            }))
+            .filter(mark => mark.to > mark.from)
+            .sort((a, b) => a.from - b.from);
+
+    let cursor =
+        from;
+
+    for (const insert of inserts) {
+        if (cursor < insert.from) {
+            const normalSpan =
+                document.createElement("span");
+
+            normalSpan.textContent =
+                source.slice(cursor, insert.from);
+
+            parent.appendChild(normalSpan);
+        }
+
+        const insertSpan =
+            document.createElement("span");
+
+        insertSpan.className =
+            "review-insert review-reading-insert";
+
+        insertSpan.textContent =
+            source.slice(insert.from, insert.to);
+
+        parent.appendChild(insertSpan);
+
+        cursor =
+            insert.to;
+    }
+
+    if (cursor < to) {
+        const normalSpan =
+            document.createElement("span");
+
+        normalSpan.textContent =
+            source.slice(cursor, to);
+
+        parent.appendChild(normalSpan);
+    }
+};
+
         const renderedDeleteMarks =
             new Set<number>();
 
@@ -904,82 +994,91 @@ private getTextParagraphsForReview(
 
             for (const line of paragraph.lines) {
 
-                const deletesBeforeLine =
-                    review.deletes.filter((mark, index) =>
-                        !renderedDeleteMarks.has(index) &&
-                        !isDeleteInsideTable(mark.from) &&
-                        mark.from <= line.from
-                    );
+    const deletesBeforeLine =
+    review.deletes.filter((mark, index) =>
+        !renderedDeleteMarks.has(index) &&
+        !isDeleteInsideTable(mark.from) &&
+        mark.from < line.from
+    );
 
-                for (const deleted of deletesBeforeLine) {
-                    appendLineBreak();
+    let hadDeleteBeforeLine =
+    false;
 
-                    const span =
-                        document.createElement("span");
+for (const deleted of deletesBeforeLine) {
+    appendLineBreak();
 
-                    span.className =
-                        "review-delete review-reading-delete";
+    appendDeletedText(
+        block,
+        deleted.text
+    );
 
-                    span.textContent =
-                        deleted.text.trim();
+    renderedDeleteMarks.add(
+        review.deletes.indexOf(deleted)
+    );
 
-                    block.appendChild(span);
+    hadDeleteBeforeLine =
+        true;
+}
 
-                    renderedDeleteMarks.add(
-                        review.deletes.indexOf(deleted)
-                    );
-                }
+if (hadDeleteBeforeLine) {
+    block.appendChild(
+        document.createElement("br")
+    );
+} else {
+    appendLineBreak();
+}
 
-                appendLineBreak();
+    const deletesInLine =
+        review.deletes
+            .map((mark, index) => ({
+                ...mark,
+                index
+            }))
+            .filter(mark =>
+                !renderedDeleteMarks.has(mark.index) &&
+                !isDeleteInsideTable(mark.from) &&
+                mark.from >= line.from &&
+mark.from <= line.to
+            )
+            .sort((a, b) =>
+                a.from - b.from
+            );
 
-                const lineHasInsert =
-                    review.inserts.some(mark =>
-                        this.rangesOverlap(
-                            mark.from,
-                            mark.to,
-                            line.from,
-                            line.to
-                        )
-                    );
+    let cursor =
+        line.from;
 
-                const span =
-                    document.createElement("span");
+    for (const deleted of deletesInLine) {
+        const deletePosition =
+            Math.max(
+                line.from,
+                Math.min(deleted.from, line.to)
+            );
 
-                span.textContent =
-                    line.text;
+        appendTextWithInserts(
+            block,
+            cursor,
+            deletePosition
+        );
 
-                if (lineHasInsert) {
-                    span.className =
-                        "review-insert review-reading-insert";
-                }
+        appendDeletedText(
+            block,
+            deleted.text
+        );
 
-                block.appendChild(span);
+        renderedDeleteMarks.add(
+            deleted.index
+        );
 
-                const deletesInLine =
-                    review.deletes.filter((mark, index) =>
-                        !renderedDeleteMarks.has(index) &&
-                        !isDeleteInsideTable(mark.from) &&
-                        mark.from > line.from &&
-                        mark.from <= line.to
-                    );
+        cursor =
+            deletePosition;
+    }
 
-                for (const deleted of deletesInLine) {
-                    const deleteSpan =
-                        document.createElement("span");
-
-                    deleteSpan.className =
-                        "review-delete review-reading-delete";
-
-                    deleteSpan.textContent =
-                        " " + deleted.text.trim();
-
-                    block.appendChild(deleteSpan);
-
-                    renderedDeleteMarks.add(
-                        review.deletes.indexOf(deleted)
-                    );
-                }
-            }
+    appendTextWithInserts(
+        block,
+        cursor,
+        line.to
+    );
+}
         }
 
         const remainingDeletes =
@@ -995,23 +1094,17 @@ private getTextParagraphsForReview(
                 container;
 
             for (const deleted of remainingDeletes) {
-                const span =
-                    document.createElement("span");
+    target.appendChild(
+        document.createElement("br")
+    );
 
-                span.className =
-                    "review-delete review-reading-delete";
-
-                span.textContent =
-                    deleted.text.trim();
-
-                target.appendChild(
-                    document.createElement("br")
-                );
-
-                target.appendChild(span);
-            }
+    appendDeletedText(
+        target,
+        deleted.text
+    );
         }
     }
+}
 
     private getFilePath(): string | null {
 
@@ -1530,16 +1623,24 @@ private getTextParagraphsForReview(
             );
 
         if (insert) {
-            return {
-                type: "insert" as const,
-                from: selection.empty
-                    ? Math.max(searchFrom, insert.from)
-                    : searchFrom,
-                to: selection.empty
-                    ? Math.min(searchTo, insert.to)
-                    : searchTo
-            };
-        }
+
+    if (selection.empty) {
+        const line =
+            cm.state.doc.lineAt(searchFrom);
+
+        return {
+            type: "insert" as const,
+            from: Math.max(line.from, insert.from),
+            to: Math.min(line.to, insert.to)
+        };
+    }
+
+    return {
+        type: "insert" as const,
+        from: Math.max(searchFrom, insert.from),
+        to: Math.min(searchTo, insert.to)
+    };
+}
 
         const deleteMark =
             review.deletes.find(mark =>
@@ -1592,13 +1693,36 @@ private getTextParagraphsForReview(
 
         if (selected.type === "insert") {
 
-            const nextInserts =
-                review.inserts.filter(mark =>
-                    !(
-                        mark.from < acceptTo &&
-                        mark.to > acceptFrom
-                    )
-                );
+            const nextInserts: {
+    from: number;
+    to: number;
+}[] = [];
+
+for (const mark of review.inserts) {
+
+    const overlaps =
+        mark.from < acceptTo &&
+        mark.to > acceptFrom;
+
+    if (!overlaps) {
+        nextInserts.push(mark);
+        continue;
+    }
+
+    if (mark.from < acceptFrom) {
+        nextInserts.push({
+            from: mark.from,
+            to: acceptFrom
+        });
+    }
+
+    if (mark.to > acceptTo) {
+        nextInserts.push({
+            from: acceptTo,
+            to: mark.to
+        });
+    }
+}
 
             const nextDeletes =
                 review.deletes.filter(mark =>
@@ -1652,11 +1776,11 @@ private getTextParagraphsForReview(
                 );
 
             const nextState: ReviewData = {
-                enabled: review.enabled,
-                baseText: cm.state.doc.toString(),
-                inserts: [...review.inserts],
-                deletes: nextDeletes
-            };
+    enabled: review.enabled,
+    baseText: review.baseText,
+    inserts: [...review.inserts],
+    deletes: nextDeletes
+};
 
             cm.dispatch({
                 effects:
